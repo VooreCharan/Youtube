@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: yt-automation-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./generated:/app/generated
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./.env:/app/.env
+      - ./client_secrets.json:/app/client_secrets.json
+      - ./token.pickle:/app/token.pickle
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    container_name: yt-automation-dashboard
+    command: streamlit run dashboard/streamlit_app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./generated:/app/generated
+      - ./logs:/app/logs
+      - ./data:/app/data
+    env_file:
+      - .env
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  generated:
+  logs:
+  data:
