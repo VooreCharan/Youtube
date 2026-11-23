@@ -18,8 +18,9 @@ class Settings(BaseSettings):
     # ── LLM chain ────────────────────────────────────────────────────
     # Providers are tried in this order; ones without a key are skipped.
     llm_chain: str = Field(
-        default="groq,gemini,openrouter_free,github,openai,openrouter",
-        description="Comma-separated provider priority order",
+        default="groq,gemini,openrouter_free,github",
+        description="Comma-separated provider priority order. Free providers only by default; "
+        "append ',openai,openrouter' to allow paid fallbacks.",
     )
     llm_timeout: float = Field(default=90, description="Seconds before a model is abandoned for the next one")
     llm_max_wait: float = Field(default=240, description="Total seconds one request may spend across the whole chain")

@@ -135,8 +135,10 @@ Approved videos are published with `YOUTUBE_PRIVACY` (default `public`). Telegra
 Every AI call (topics, scripts, titles) walks this chain and uses the first good answer:
 
 ```
-Groq → Gemini (4 models) → OpenRouter free → GitHub Models → OpenAI PAID → OpenRouter PAID
+Groq → Gemini (4 models) → OpenRouter free → GitHub Models
 ```
+
+Only free providers are used by default. To allow paid fallbacks, set `LLM_CHAIN=groq,gemini,openrouter_free,github,openai,openrouter`.
 
 The order follows each provider's free allowance, most generous first, so the daily limits last as long as possible:
 
@@ -146,8 +148,8 @@ The order follows each provider's free allowance, most generous first, so the da
 | 2 | Gemini | daily request caps per model; often overloaded at peak times |
 | 3 | OpenRouter free models | ~50 requests/day (1,000/day after a one-time $10 top-up) |
 | 4 | GitHub Models | ~50–150 requests/day, short answers only |
-| 5 | OpenAI (gpt-5.4-mini, gpt-4.1-mini) | paid, but cheap mini models |
-| 6 | OpenRouter paid (Gemini 2.5 Pro) | most expensive, so the very last resort |
+| (opt-in) | OpenAI (gpt-5.4-mini, gpt-4.1-mini) | paid |
+| (opt-in) | OpenRouter paid (Gemini 2.5 Pro) | paid |
 
 Free limits change often; check each provider's dashboard. To change the order, set `LLM_CHAIN` in `.env`.
 
