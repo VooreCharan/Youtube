@@ -72,6 +72,7 @@ def _run_ffmpeg_pipeline(
     target_h: int,
     subtitle_path: str | None,
     base_dir: Path,
+    language: str | None = None,
 ) -> None:
     """Execute the final FFmpeg render command."""
     
@@ -80,7 +81,7 @@ def _run_ffmpeg_pipeline(
     vf = f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
 
     # 2. Burn subtitles if available
-    if subtitle_path and Path(subtitle_path).exists():
+    if subtitle_path and Path(subtitle_path).exists() and Path(subtitle_path).stat().st_size > 0:
         # Use a relative path to avoid Windows drive-letter colon parsing bugs in the subtitles filter
         try:
             rel_sub = Path(subtitle_path).relative_to(base_dir).as_posix()
@@ -90,7 +91,11 @@ def _run_ffmpeg_pipeline(
         
         # Subtitle styling: very small bold white text, translucent outline, anchored to bottom
         font_size = 14
-        style = f"FontSize={font_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H99000000,BorderStyle=1,Outline=2.5,Shadow=0,Bold=-1,MarginV=10,Alignment=2"
+        from app.utils.fonts import subtitle_font_family
+
+        family = subtitle_font_family(language)
+        font_name = f"FontName={family}," if family else ""
+        style = f"{font_name}FontSize={font_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H99000000,BorderStyle=1,Outline=2.5,Shadow=0,Bold=-1,MarginV=10,Alignment=2"
         vf += f",subtitles='{rel_sub}':force_style='{style}'"
 
     cmd = [
@@ -187,6 +192,7 @@ async def create_video(
                 target_h=target_h,
                 subtitle_path=video.subtitle_path,
                 base_dir=settings.base_dir,
+                language=video.language,
             )
             
             # Cleanup temp concat file

@@ -18,6 +18,21 @@ services:
       - .env
     restart: unless-stopped
 
+  bot:
+    build: .
+    container_name: yt-automation-bot
+    command: python -m app.bot
+    volumes:
+      - ./generated:/app/generated
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./.env:/app/.env
+      - ./client_secrets.json:/app/client_secrets.json
+      - ./token.pickle:/app/token.pickle
+    env_file:
+      - .env
+    restart: unless-stopped
+
   dashboard:
     build: .
     container_name: yt-automation-dashboard

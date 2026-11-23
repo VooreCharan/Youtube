@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from app.config import get_settings
 from app.database import init_db
 from app.routers import generation, upload
 from app.scheduler.jobs import start_scheduler, shutdown_scheduler
@@ -31,14 +32,17 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialised")
 
-    start_scheduler()
-    logger.info("Scheduler started")
+    settings = get_settings()
+    if settings.enable_scheduler:
+        start_scheduler()
+        logger.info("Scheduler started")
+    else:
+        logger.info("Scheduler disabled (ENABLE_SCHEDULER=false) — videos go through Telegram approval")
 
     yield
 
     # ── Shutdown ──
     shutdown_scheduler()
-    logger.info("Scheduler stopped")
     logger.info("YouTube Automation API shutting down")
 
 

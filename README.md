@@ -11,14 +11,15 @@ Complete automation system that generates content, creates videos, and uploads t
 
 ## ✨ Features
 
-- 🤖 **AI Script Generation** — Gemini Flash or local Ollama for topic/script creation
+- 🤖 **AI Script Generation** — fallback chain over 6 providers (Groq, Gemini, OpenRouter free, GitHub Models, then paid OpenAI and OpenRouter); if one fails, the next takes over
 - 🎙️ **Text-to-Speech** — High-quality narration via Microsoft Edge-TTS (free, no API key)
 - 🖼️ **Image Generation** — Pexels stock photos with gradient fallback (no GPU needed)
 - 🎥 **Video Assembly** — MoviePy-based composition with transitions and subtitle burn-in
 - 📝 **Auto-Subtitles** — Faster-Whisper transcription with SRT export
 - 🖼️ **Thumbnail Generation** — Professional 1280×720 thumbnails with Pillow
 - 📤 **YouTube Upload** — OAuth 2.0 with resumable uploads and exponential backoff
-- 📅 **Scheduler** — APScheduler for daily auto-generation and upload
+- 🤖 **Telegram Bot** — approve topic → script → voice → video → publish, in 15 languages
+- 📅 **Scheduler** (optional, `ENABLE_SCHEDULER=true`) — unattended daily generation and upload
 - 📱 **Telegram Notifications** — Real-time alerts on upload success/failure
 - 🎨 **Streamlit Dashboard** — Visual pipeline control with history and log viewing
 
@@ -41,6 +42,8 @@ youtube-automation/
 │   │   ├── __init__.py
 │   │   ├── llm_service.py     # LLM abstraction (Gemini/Ollama)
 │   │   ├── topic_service.py   # Topic generation
+│   │   ├── trends_service.py  # Latest topics from Google News + LLM
+│   │   ├── languages.py       # Languages & voices catalog
 │   │   ├── script_service.py  # Script generation
 │   │   ├── tts_service.py     # Text-to-Speech
 │   │   ├── image_service.py   # Image generation
@@ -53,6 +56,13 @@ youtube-automation/
 │   │   ├── __init__.py
 │   │   ├── generation.py      # Generation endpoints
 │   │   └── upload.py          # Upload & history endpoints
+│   ├── bot/                   # Telegram bot (python -m app.bot)
+│   │   ├── app.py             # Application setup & handler registration
+│   │   ├── handlers.py        # Conversation flow for the 3 options
+│   │   ├── keyboards.py       # Inline buttons
+│   │   ├── pipeline.py        # Bot → services facade (DB sessions, previews)
+│   │   └── session.py         # Per-chat state machine
+│   ├── youtube_auth.py        # One-time YouTube login
 │   ├── scheduler/
 │   │   ├── __init__.py
 │   │   └── jobs.py            # APScheduler job definitions
@@ -77,6 +87,78 @@ youtube-automation/
 ├── docker-compose.yml
 └── README.md
 ```
+
+---
+
+## 🤖 Telegram Bot (main way to use it)
+
+Say **hi** to your bot and pick one of three options. Nothing is published until you approve it.
+
+```
+hi ─► 1️⃣ Find a trending topic
+      │   language ─► category ─► latest topics (🔄 show others / ✍️ type your own)
+      │   ─► AI script  [✅ approve · 🔄 regenerate · ✏️ edit]
+      │   ─► voice samples (listen, tap one) ─► voice-over  [✅ approve · 🎙 other voice]
+      │   ─► video preview  [🚀 approve & publish · 🔄 new visuals]  ─► YouTube ✅
+      │
+      ├► 2️⃣ I have a script  ─► language ─► paste script ─► voices ─► voice-over ─► video ─► YouTube
+      │
+      └► 3️⃣ I have the audio ─► upload file (language auto-detected) ─► video ─► YouTube
+```
+
+- **Latest topics** come from Google News headlines for the category and language, which the AI turns into video ideas.
+- **15 languages:** English, Hindi, Telugu, Tamil, Kannada, Malayalam, Bengali, Marathi, Gujarati, Spanish, French, German, Portuguese, Arabic and Japanese. Each has 2–8 neural voices (Edge-TTS) plus a basic Google voice.
+- Each voice sample reads the opening of **your** script, so you hear exactly how it will sound.
+- Commands: `/start` (menu) · `/cancel` · `/help`
+
+### Bot setup
+
+1. **Create the bot:** message [@BotFather](https://t.me/BotFather), run `/newbot`, and put the token in `TELEGRAM_BOT_TOKEN`.
+2. **Lock it to you:** start the bot and say hi. It replies with your Telegram user ID. Put that in `TELEGRAM_ALLOWED_USERS` (comma-separate several IDs) and restart. Anyone else is refused, because the bot can publish to your channel.
+3. **Connect YouTube once** on a machine with a browser (needs `client_secrets.json`, see [YouTube Setup](#-youtube-api-setup)):
+   ```bash
+   python -m app.youtube_auth      # saves token.pickle
+   ```
+   If the bot runs on a server, copy `token.pickle` next to it.
+4. **Run the bot:**
+   ```bash
+   python -m app.bot
+   ```
+   It uses long polling, so no public URL or webhook is needed.
+
+Approved videos are published with `YOUTUBE_PRIVACY` (default `public`). Telegram limits: uploads to the bot up to **20 MB**; previews larger than 50 MB are re-encoded at a lower resolution for Telegram only. YouTube gets the full-quality file.
+
+---
+
+## 🧠 AI provider fallback chain
+
+Every AI call (topics, scripts, titles) walks this chain and uses the first good answer:
+
+```
+Groq → Gemini (4 models) → OpenRouter free → GitHub Models → OpenAI PAID → OpenRouter PAID
+```
+
+The order follows each provider's free allowance, most generous first, so the daily limits last as long as possible:
+
+| # | Provider | Free allowance (approx.) |
+|---|---|---|
+| 1 | Groq (gpt-oss-120b, qwen3.8-27b, gpt-oss-20b) | separate free daily limit per model; very fast |
+| 2 | Gemini | daily request caps per model; often overloaded at peak times |
+| 3 | OpenRouter free models | ~50 requests/day (1,000/day after a one-time $10 top-up) |
+| 4 | GitHub Models | ~50–150 requests/day, short answers only |
+| 5 | OpenAI (gpt-5.4-mini, gpt-4.1-mini) | paid, but cheap mini models |
+| 6 | OpenRouter paid (Gemini 2.5 Pro) | most expensive, so the very last resort |
+
+Free limits change often; check each provider's dashboard. To change the order, set `LLM_CHAIN` in `.env`.
+
+- Providers without a key are skipped, so add as many free keys as you can (see `.env.example`).
+- A model that is overloaded (503), rate-limited (429), times out, or returns broken JSON is skipped. It rests briefly so later calls don't wait on it.
+- A bad key or missing credits (401/402/403) rests that whole provider for 30 minutes. An unknown model name (404) rests that model for 6 hours.
+- If everything fails, overloaded models get up to 2 more tries, within a 4-minute total limit. The bot then reports exactly which provider failed and why.
+- Check your setup at any time:
+  ```bash
+  python -m app.llm_check
+  ```
 
 ---
 
@@ -132,7 +214,10 @@ streamlit run dashboard/streamlit_app.py
 ## 🐳 Docker
 
 ```bash
-docker-compose up --build
+# create these first, otherwise Docker mounts them as empty directories
+python -m app.youtube_auth            # → token.pickle (client_secrets.json must exist)
+docker-compose up --build -d          # api + bot + dashboard
+docker-compose logs -f bot
 ```
 
 ---
@@ -203,8 +288,13 @@ All settings are in `.env`. Key options:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `gemini` | `gemini` or `ollama` |
-| `GEMINI_API_KEY` | — | Google AI Studio API key |
+| `LLM_PROVIDER` | `openrouter` | `openrouter` or `ollama` |
+| `OPENROUTER_API_KEY` | — | OpenRouter API key |
+| `TELEGRAM_BOT_TOKEN` | — | From @BotFather |
+| `TELEGRAM_ALLOWED_USERS` | — | Telegram user IDs allowed to use the bot |
+| `YOUTUBE_PRIVACY` | `public` | Privacy for videos approved in Telegram |
+| `ENABLE_SCHEDULER` | `false` | Unattended daily jobs (skip approval) |
+| `MEDIA_PROVIDER` | `pexels` | `pexels` (free stock footage) or `veo` (AI video, paid & slow) |
 | `WHISPER_MODEL_SIZE` | `base` | `base`, `medium`, or `large-v3` |
 | `DEFAULT_VOICE` | `en-US-AvaNeural` | Edge-TTS voice |
 | `DEFAULT_VIDEO_FORMAT` | `horizontal` | `horizontal` or `vertical` |

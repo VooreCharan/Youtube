@@ -6,6 +6,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
         fonts-dejavu-core \
+        fonts-noto-core \
+        fonts-noto-cjk \
+        libraqm0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -20,6 +23,7 @@ COPY . .
 # Create output directories
 RUN mkdir -p generated/scripts generated/audio generated/images \
     generated/videos generated/subtitles generated/thumbnails \
+    generated/voice_samples generated/uploads generated/previews \
     logs data
 
 # Expose ports

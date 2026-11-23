@@ -1,90 +1,126 @@
 """
 Text-to-Speech service.
 
-Primary:  gTTS  (Google Translate TTS — free, no API key, very reliable)
-Fallback: edge-tts (Microsoft, may return 403 when token is rotated)
+Neural voices:  edge-tts (Microsoft, free, several male/female voices per language)
+Basic voice:    gTTS     (Google Translate TTS, one voice per language)
+
+Each engine falls back to the other so narration still gets produced
+if one service is unavailable.
 """
 
 from __future__ import annotations
 
 import asyncio
-from functools import partial
+import hashlib
+import re
 from pathlib import Path
+from typing import List, Optional, Tuple
 
-from gtts import gTTS
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models.video import Video
-
-
-# Map common Edge-TTS locale prefixes → gTTS language codes
-_LOCALE_TO_GTTS: dict[str, str] = {
-    "en": "en",
-    "es": "es",
-    "fr": "fr",
-    "de": "de",
-    "it": "it",
-    "pt": "pt",
-    "hi": "hi",
-    "ja": "ja",
-    "ko": "ko",
-    "zh": "zh",
-    "ar": "ar",
-    "ru": "ru",
-    "nl": "nl",
-    "pl": "pl",
-    "tr": "tr",
-    "sv": "sv",
-    "da": "da",
-    "fi": "fi",
-    "nb": "no",
-    "id": "id",
-    # Indian languages
-    "te": "te",
-    "ta": "ta",
-    "bn": "bn",
-    "mr": "mr",
-    "gu": "gu",
-}
-
-# Default gTTS language when the voice locale can't be resolved
-_DEFAULT_LANG = "en"
+from app.services.languages import (
+    GTTS_VOICE_PREFIX,
+    LANGUAGES,
+    Language,
+    Voice,
+    get_language,
+    language_from_voice,
+)
 
 
 def _voice_to_lang(voice: str) -> str:
-    """
-    Derive a gTTS language code from an Edge-TTS voice name or locale string.
+    """Kept for backwards compatibility: 'en-US-AvaNeural' / 'gtts:te' → 'en' / 'te'."""
+    return language_from_voice(voice).code
 
-    Examples:
-        'en-US-AvaNeural'  → 'en'
-        'fr-FR-DeniseNeural' → 'fr'
-        'en'               → 'en'
-    """
-    prefix = voice.split("-")[0].lower()
-    return _LOCALE_TO_GTTS.get(prefix, _DEFAULT_LANG)
 
+# ── Script cleaning ─────────────────────────────────────────────────
+
+_SCENE_HEADER = re.compile(r"^\s*scene\s+\d+\s*[:\-–]", re.IGNORECASE)
+
+
+def narration_from_script(script: str) -> str:
+    """Strip 'Scene N: …' headers and bracketed stage directions, keep spoken text."""
+    lines = []
+    for line in (script or "").splitlines():
+        stripped = line.strip()
+        if not stripped or _SCENE_HEADER.match(stripped):
+            continue
+        stripped = re.sub(r"^\[(.*)\]$", r"\1", stripped)  # "[text]" placeholders → text
+        lines.append(stripped)
+    return " ".join(lines)
+
+
+def sample_text(narration: str, max_chars: int = 220) -> str:
+    """First sentence(s) of the narration, used for voice previews."""
+    if len(narration) <= max_chars:
+        return narration
+    cut = narration[:max_chars]
+    end = max(cut.rfind(p) for p in (".", "!", "?", "।", "。"))
+    return cut[: end + 1] if end > 60 else cut.rsplit(" ", 1)[0] + "…"
+
+
+# ── Engines ─────────────────────────────────────────────────────────
 
 def _run_gtts(text: str, lang: str, output_path: Path) -> None:
-    """Blocking call — run inside a thread via asyncio.to_thread."""
-    tts = gTTS(text=text, lang=lang, slow=False)
-    tts.save(str(output_path))
+    from gtts import gTTS  # imported lazily so a missing package only breaks this engine
 
+    gTTS(text=text, lang=lang, slow=False).save(str(output_path))
+
+
+async def _edge(text: str, voice: str, output_path: Path) -> None:
+    import edge_tts
+
+    await edge_tts.Communicate(text, voice).save(str(output_path))
+
+
+async def synthesize(text: str, voice: str, output_path: Path) -> str:
+    """
+    Render *text* with *voice* to *output_path* (MP3).
+
+    Returns the voice actually used (may differ if a fallback engine was needed).
+    """
+    language = language_from_voice(voice)
+    neural_fallback = language.voices[0].id if language.voices else None
+
+    attempts: List[Tuple[str, str]] = []  # (engine, voice)
+    if voice.startswith(GTTS_VOICE_PREFIX):
+        attempts.append(("gtts", voice))
+        if neural_fallback:
+            attempts.append(("edge", neural_fallback))
+    else:
+        attempts.append(("edge", voice))
+        attempts.append(("gtts", f"{GTTS_VOICE_PREFIX}{language.code}"))
+
+    errors = []
+    for engine, v in attempts:
+        try:
+            if engine == "edge":
+                await _edge(text, v, output_path)
+            else:
+                await asyncio.to_thread(_run_gtts, text, language.code, output_path)
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                raise RuntimeError("engine produced an empty file")
+            if v != voice:
+                logger.warning("TTS fell back from '{}' to '{}'", voice, v)
+            return v
+        except Exception as exc:  # noqa: BLE001 — try the next engine
+            logger.warning("TTS engine {} failed for voice '{}': {}", engine, v, exc)
+            errors.append(f"{engine}({v}): {exc}")
+
+    raise RuntimeError("All TTS engines failed: " + " | ".join(errors))
+
+
+# ── Public API ──────────────────────────────────────────────────────
 
 async def generate_audio(
     db: AsyncSession,
     video_id: int,
-    voice: str | None = None,
+    voice: Optional[str] = None,
 ) -> str:
-    """
-    Generate an MP3 narration file from the video's script.
-
-    Uses gTTS (Google Translate TTS) as the primary engine.
-    Falls back to edge-tts if gTTS fails.
-
-    Returns the absolute path to the saved audio file.
-    """
+    """Generate the full MP3 narration for a video. Returns the audio path."""
     settings = get_settings()
 
     video = await db.get(Video, video_id)
@@ -94,101 +130,67 @@ async def generate_audio(
         raise ValueError(f"Video {video_id} has no script — generate script first")
 
     selected_voice = voice or video.voice or settings.default_voice
-    output_path = settings.audio_dir / f"{video_id}.mp3"
-    lang = _voice_to_lang(selected_voice)
-
-    logger.info(
-        "Generating TTS audio for Video id={} | voice='{}' → lang='{}'",
-        video_id,
-        selected_voice,
-        lang,
-    )
-
-    # ── Clean script ─────────────────────────────────────────────────
-    lines = video.script.split("\n")
-    narration_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.lower().startswith("scene ") and ":" in stripped:
-            continue  # skip scene headers
-        if stripped:
-            narration_lines.append(stripped)
-    narration = " ".join(narration_lines)
-
+    narration = narration_from_script(video.script)
     if not narration.strip():
         raise ValueError(f"Video {video_id} script has no narration content")
 
-    # ── Primary: gTTS ────────────────────────────────────────────────
-    try:
-        await asyncio.to_thread(_run_gtts, narration, lang, output_path)
-        logger.info(
-            "gTTS audio saved: {} ({:.1f} KB)",
-            output_path,
-            output_path.stat().st_size / 1024,
-        )
-    except Exception as gtts_exc:
-        logger.warning("gTTS failed ({}), trying edge-tts fallback …", gtts_exc)
+    output_path = settings.audio_dir / f"{video_id}.mp3"
+    logger.info("Generating narration for Video id={} with voice '{}'", video_id, selected_voice)
 
-        # ── Fallback: edge-tts ────────────────────────────────────────
-        try:
-            import edge_tts  # noqa: PLC0415
-
-            communicate = edge_tts.Communicate(narration, selected_voice)
-            await communicate.save(str(output_path))
-            logger.info(
-                "edge-tts fallback audio saved: {} ({:.1f} KB)",
-                output_path,
-                output_path.stat().st_size / 1024,
-            )
-        except Exception as edge_exc:
-            logger.error("Both gTTS and edge-tts failed. gTTS={} | edge={}", gtts_exc, edge_exc)
-            raise RuntimeError(
-                f"All TTS engines failed.\n"
-                f"  • gTTS error:     {gtts_exc}\n"
-                f"  • edge-tts error: {edge_exc}"
-            ) from edge_exc
+    used_voice = await synthesize(narration, selected_voice, output_path)
+    logger.info("Narration saved: {} ({:.1f} KB)", output_path, output_path.stat().st_size / 1024)
 
     video.audio_path = str(output_path)
-    video.voice = selected_voice
+    video.voice = used_voice
+    video.subtitle_path = None  # audio changed → subtitles must be regenerated
     await db.flush()
-
     return str(output_path)
 
 
-# ── Voice listing ─────────────────────────────────────────────────────────────
+async def generate_voice_samples(text: str, language: Language) -> List[Tuple[Voice, Path]]:
+    """
+    Render *text* with every voice offered for *language*.
 
-_GTTS_VOICES: list[dict] = [
-    {"name": "en-US", "gender": "Neutral", "locale": "en-US"},
-    {"name": "en-GB", "gender": "Neutral", "locale": "en-GB"},
-    {"name": "en-AU", "gender": "Neutral", "locale": "en-AU"},
-    {"name": "en-IN", "gender": "Neutral", "locale": "en-IN"},
-    {"name": "es-ES", "gender": "Neutral", "locale": "es-ES"},
-    {"name": "es-MX", "gender": "Neutral", "locale": "es-MX"},
-    {"name": "fr-FR", "gender": "Neutral", "locale": "fr-FR"},
-    {"name": "de-DE", "gender": "Neutral", "locale": "de-DE"},
-    {"name": "it-IT", "gender": "Neutral", "locale": "it-IT"},
-    {"name": "pt-BR", "gender": "Neutral", "locale": "pt-BR"},
-    {"name": "pt-PT", "gender": "Neutral", "locale": "pt-PT"},
-    {"name": "hi-IN", "gender": "Neutral", "locale": "hi-IN"},
-    {"name": "ja-JP", "gender": "Neutral", "locale": "ja-JP"},
-    {"name": "ko-KR", "gender": "Neutral", "locale": "ko-KR"},
-    {"name": "zh-CN", "gender": "Neutral", "locale": "zh-CN"},
-    {"name": "zh-TW", "gender": "Neutral", "locale": "zh-TW"},
-    {"name": "ar-SA", "gender": "Neutral", "locale": "ar-SA"},
-    {"name": "ru-RU", "gender": "Neutral", "locale": "ru-RU"},
-    {"name": "nl-NL", "gender": "Neutral", "locale": "nl-NL"},
-    {"name": "pl-PL", "gender": "Neutral", "locale": "pl-PL"},
-    {"name": "tr-TR", "gender": "Neutral", "locale": "tr-TR"},
-    {"name": "sv-SE", "gender": "Neutral", "locale": "sv-SE"},
-    {"name": "id-ID", "gender": "Neutral", "locale": "id-ID"},
-    {"name": "te-IN", "gender": "Neutral", "locale": "te-IN"},  # Telugu
-    {"name": "ta-IN", "gender": "Neutral", "locale": "ta-IN"},  # Tamil
-    {"name": "bn-IN", "gender": "Neutral", "locale": "bn-IN"},  # Bengali
-    {"name": "mr-IN", "gender": "Neutral", "locale": "mr-IN"},  # Marathi
-    {"name": "gu-IN", "gender": "Neutral", "locale": "gu-IN"},  # Gujarati
-]
+    Samples are cached by (voice, text) so re-opening the voice list is instant.
+    Voices that fail to render are skipped.
+    """
+    settings = get_settings()
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+    async def _one(voice: Voice) -> Optional[Tuple[Voice, Path]]:
+        safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", voice.id)
+        path = settings.voice_samples_dir / f"{safe_id}_{digest}.mp3"
+        if path.exists() and path.stat().st_size > 0:
+            return voice, path
+        try:
+            used = await synthesize(text, voice.id, path)
+            if used != voice.id:  # don't present a fallback as if it were this voice
+                path.unlink(missing_ok=True)
+                return None
+            return voice, path
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Voice sample failed for {}: {}", voice.id, exc)
+            return None
+
+    results = await asyncio.gather(*(_one(v) for v in language.all_voices()))
+    return [r for r in results if r]
 
 
 async def list_voices() -> list[dict]:
-    """Return available TTS voices (gTTS locale list)."""
-    return _GTTS_VOICES
+    """Return all available voices, grouped by language."""
+    voices = []
+    for lang in LANGUAGES.values():
+        for v in lang.all_voices():
+            voices.append({"name": v.id, "label": v.label, "language": lang.name, "locale": lang.code})
+    return voices
+
+
+__all__ = [
+    "generate_audio",
+    "generate_voice_samples",
+    "list_voices",
+    "narration_from_script",
+    "sample_text",
+    "synthesize",
+    "get_language",
+]

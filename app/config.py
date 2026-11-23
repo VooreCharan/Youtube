@@ -15,10 +15,37 @@ from pydantic import Field
 class Settings(BaseSettings):
     """Application-wide settings sourced from .env file."""
 
-    # ── LLM ──────────────────────────────────────────────────────────
-    llm_provider: str = Field(default="openrouter", description="openrouter | ollama")
-    openrouter_api_key: str = Field(default="", description="OpenRouter API key")
-    openrouter_model: str = Field(default="google/gemini-2.5-pro", description="OpenRouter model name")
+    # ── LLM chain ────────────────────────────────────────────────────
+    # Providers are tried in this order; ones without a key are skipped.
+    llm_chain: str = Field(
+        default="groq,gemini,openrouter_free,github,openai,openrouter",
+        description="Comma-separated provider priority order",
+    )
+    llm_timeout: float = Field(default=90, description="Seconds before a model is abandoned for the next one")
+    llm_max_wait: float = Field(default=240, description="Total seconds one request may spend across the whole chain")
+    llm_retry_rounds: int = Field(default=2, description="Extra passes over temporarily failing models")
+    llm_retry_delay: float = Field(default=8, description="Seconds to wait before an extra pass")
+    llm_provider: str = Field(default="openrouter", description="Legacy: 'ollama' puts Ollama first in the chain")
+
+    # Keys (all have free tiers except paid OpenRouter models)
+    gemini_api_key: str = Field(default="", description="Google AI Studio key — used for text and Veo")
+    groq_api_key: str = Field(default="")
+    github_token: str = Field(default="", description="GitHub token with models:read")
+    openrouter_api_key: str = Field(default="", description="Used for free and paid OpenRouter models")
+    openai_api_key: str = Field(default="", description="Paid OpenAI fallback")
+
+    # Models per provider (comma-separated, tried in order)
+    gemini_models: str = Field(
+        default="gemini-flash-latest,gemini-3.5-flash,gemini-flash-lite-latest,gemini-3.1-flash-lite"
+    )
+    groq_models: str = Field(
+        default="openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b",
+        description="Each Groq model has its own free daily limit",
+    )
+    openrouter_free_models: str = Field(default="google/gemma-4-31b-it:free,nvidia/nemotron-3-ultra-550b-a55b:free")
+    github_models: str = Field(default="openai/gpt-4.1-mini")
+    openai_models: str = Field(default="gpt-5.4-mini,gpt-4.1-mini", description="Paid fallback models")
+    openrouter_model: str = Field(default="google/gemini-2.5-pro", description="Paid last-resort model")
     ollama_model: str = Field(default="llama3")
     ollama_base_url: str = Field(default="http://localhost:11434")
 
@@ -27,18 +54,28 @@ class Settings(BaseSettings):
 
     # ── Telegram ─────────────────────────────────────────────────────
     telegram_bot_token: str = Field(default="")
-    telegram_chat_id: str = Field(default="")
+    telegram_chat_id: str = Field(default="", description="Chat that receives scheduler notifications")
+    telegram_allowed_users: str = Field(
+        default="",
+        description="Comma-separated Telegram user IDs allowed to use the bot",
+    )
+    topics_per_page: int = Field(default=8, description="Topic ideas shown per batch in the bot")
+
+    # ── Publishing ───────────────────────────────────────────────────
+    youtube_privacy: str = Field(
+        default="public",
+        description="Privacy used when the bot publishes an approved video: public | unlisted | private",
+    )
 
     # ── Media Generation ─────────────────────────────────────────────
     media_provider: str = Field(default="pexels", description="pexels | veo")
-    gemini_api_key: str = Field(default="", description="Gemini API Key for Veo")
     pexels_api_key: str = Field(default="")
 
     # ── Whisper ──────────────────────────────────────────────────────
     whisper_model_size: str = Field(default="base")
 
     # ── TTS ──────────────────────────────────────────────────────────
-    default_voice: str = Field(default="en-US")
+    default_voice: str = Field(default="en-US-AvaNeural")
 
     # ── Video ────────────────────────────────────────────────────────
     default_video_format: str = Field(default="horizontal")
@@ -50,6 +87,10 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
 
     # ── Scheduler ────────────────────────────────────────────────────
+    enable_scheduler: bool = Field(
+        default=False,
+        description="Run the unattended daily generate/upload jobs (bypasses Telegram approval)",
+    )
     generation_hour: int = Field(default=8)
     upload_hour: int = Field(default=10)
 
@@ -61,6 +102,7 @@ class Settings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": False,
+        "extra": "ignore",  # unrelated variables in .env must not crash the app
     }
 
     # ── Derived paths ────────────────────────────────────────────────
@@ -97,6 +139,27 @@ class Settings(BaseSettings):
         return self.generated_dir / "thumbnails"
 
     @property
+    def voice_samples_dir(self) -> Path:
+        return self.generated_dir / "voice_samples"
+
+    @property
+    def uploads_dir(self) -> Path:
+        return self.generated_dir / "uploads"
+
+    @property
+    def previews_dir(self) -> Path:
+        return self.generated_dir / "previews"
+
+    @property
+    def allowed_user_ids(self) -> set[int]:
+        ids: set[int] = set()
+        for part in self.telegram_allowed_users.replace(";", ",").split(","):
+            part = part.strip()
+            if part.lstrip("-").isdigit():
+                ids.add(int(part))
+        return ids
+
+    @property
     def logs_dir(self) -> Path:
         return self.base_dir / "logs"
 
@@ -118,6 +181,9 @@ class Settings(BaseSettings):
             self.videos_dir,
             self.subtitles_dir,
             self.thumbnails_dir,
+            self.voice_samples_dir,
+            self.uploads_dir,
+            self.previews_dir,
             self.logs_dir,
             self.data_dir,
         ):

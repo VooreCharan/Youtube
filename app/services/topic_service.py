@@ -19,6 +19,9 @@ async def generate_topic(
     user_topic: str | None = None,
     voice: str | None = None,
     video_format: str | None = None,
+    language: str | None = None,
+    source: str = "api",
+    telegram_chat_id: str | None = None,
 ) -> Video:
     """
     Create a new Video record with a topic.
@@ -47,6 +50,9 @@ async def generate_topic(
         upload_status="pending",
         voice=voice or settings.default_voice,
         video_format=video_format or settings.default_video_format,
+        language=language,
+        source=source,
+        telegram_chat_id=telegram_chat_id,
     )
     db.add(video)
     await db.flush()

@@ -18,6 +18,27 @@ from app.models.video import Video
 from app.utils.helpers import json_loads_safe
 
 
+def _load_background(path: Path) -> Image.Image:
+    """Open an image, or grab a frame from a video clip (Pexels/Veo scenes are MP4s)."""
+    if path.suffix.lower() not in (".mp4", ".mov", ".webm", ".mkv"):
+        return Image.open(path).convert("RGB")
+
+    import subprocess
+    import tempfile
+
+    from app.services.video_service import _FFMPEG_EXE
+
+    with tempfile.TemporaryDirectory() as tmp:
+        frame = Path(tmp) / "frame.jpg"
+        subprocess.run(
+            [_FFMPEG_EXE, "-y", "-ss", "1", "-i", str(path), "-frames:v", "1", str(frame)],
+            capture_output=True,
+            check=True,
+            timeout=60,
+        )
+        return Image.open(frame).convert("RGB")
+
+
 async def generate_thumbnail(db: AsyncSession, video_id: int) -> str:
     """
     Create a YouTube thumbnail for the given video.
@@ -42,7 +63,7 @@ async def generate_thumbnail(db: AsyncSession, video_id: int) -> str:
     for img_path in image_paths:
         if Path(img_path).exists():
             try:
-                bg_image = Image.open(img_path).resize((width, height), Image.LANCZOS)
+                bg_image = _load_background(Path(img_path)).resize((width, height), Image.LANCZOS)
                 break
             except Exception:
                 continue
@@ -56,7 +77,7 @@ async def generate_thumbnail(db: AsyncSession, video_id: int) -> str:
 
     # Add title text
     title = video.title or video.topic
-    bg_image = _add_title_text(bg_image, title, width, height)
+    bg_image = _add_title_text(bg_image, title, width, height, video.language)
 
     # Add subtle border
     bg_image = _add_border(bg_image, width, height)
@@ -121,28 +142,15 @@ def _apply_overlay(img: Image.Image, width: int, height: int) -> Image.Image:
     return composited.convert("RGB")
 
 
-def _add_title_text(img: Image.Image, title: str, width: int, height: int) -> Image.Image:
+def _add_title_text(
+    img: Image.Image, title: str, width: int, height: int, language: str | None = None
+) -> Image.Image:
     """Render the title text on the thumbnail."""
+    from app.utils.fonts import load_font
+
     draw = ImageDraw.Draw(img)
-
-    # Try to load a bold font
     font_size = width // 16  # ~80px for 1280px width
-    font = None
-    for font_name in ["arialbd.ttf", "arial.ttf", "Impact.ttf"]:
-        try:
-            font = ImageFont.truetype(font_name, font_size)
-            break
-        except (OSError, IOError):
-            continue
-
-    if font is None:
-        try:
-            font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                font_size,
-            )
-        except (OSError, IOError):
-            font = ImageFont.load_default()
+    font = load_font(language, font_size)
 
     # Word wrap
     max_width = width - 120  # padding on both sides

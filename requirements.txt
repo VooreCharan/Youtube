@@ -14,7 +14,11 @@ google-genai==1.0.0
 openai>=1.50.0
 
 # TTS
-edge-tts==6.1.12
+edge-tts>=7.0.0,<8          # neural voices (6.x is rejected by Microsoft's endpoint)
+gTTS>=2.5.0                 # Google fallback voice
+
+# Telegram bot
+python-telegram-bot==21.6
 
 # Video Processing
 moviepy==1.0.3

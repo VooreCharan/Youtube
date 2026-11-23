@@ -37,7 +37,7 @@ class Video(Base):
     youtube_video_id = Column(String(50), nullable=True)
     upload_status = Column(
         String(20), nullable=False, default="pending"
-    )  # pending | generating | ready | uploading | uploaded | failed
+    )  # pending | generating | ready | awaiting_approval | uploading | uploaded | failed | cancelled
     privacy_status = Column(String(20), nullable=False, default="private")
 
     # Scheduling
@@ -46,6 +46,9 @@ class Video(Base):
     # Preferences
     video_format = Column(String(20), nullable=False, default="horizontal")
     voice = Column(String(100), nullable=True)
+    language = Column(String(10), nullable=True)          # e.g. "en", "te"
+    source = Column(String(20), nullable=True)            # topic | script | audio | api
+    telegram_chat_id = Column(String(50), nullable=True)  # chat that owns this video
 
     # Timestamps
     created_at = Column(
