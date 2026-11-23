@@ -70,12 +70,10 @@ def authenticate(allow_browser: bool = True):
     from googleapiclient.discovery import build
 
     settings = get_settings()
-    token_path = settings.base_dir / "token.pickle"
-    secrets_path = Path(settings.youtube_client_secrets_path)
+    token_path = settings.token_path
+    secrets_path = settings.client_secrets_file
 
-    if not secrets_path.exists():
-        secrets_path = settings.base_dir / settings.youtube_client_secrets_path
-    if not secrets_path.exists():
+    if not secrets_path.exists() and not token_path.exists():
         raise FileNotFoundError(
             f"OAuth client secrets file not found: {settings.youtube_client_secrets_path}. "
             "Download it from Google Cloud Console → APIs & Services → Credentials."
@@ -101,7 +99,8 @@ def authenticate(allow_browser: bool = True):
         if not allow_browser:
             raise YouTubeAuthRequired(
                 "YouTube is not connected yet. On a machine with a browser run "
-                "`python -m app.youtube_auth` once, then copy token.pickle next to the app."
+                "`python -m app.youtube_auth` once, then provide token.pickle to the server "
+                "(file next to the app, or YOUTUBE_TOKEN_B64 — see `python -m app.export_railway_env`)."
             )
         logger.info("Starting OAuth flow for YouTube API")
         flow = InstalledAppFlow.from_client_secrets_file(str(secrets_path), _SCOPES)

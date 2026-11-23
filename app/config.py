@@ -109,14 +109,40 @@ class Settings(BaseSettings):
         "extra": "ignore",  # unrelated variables in .env must not crash the app
     }
 
+    # ── Storage / deployment ────────────────────────────────────────
+    storage_dir: str = Field(
+        default="",
+        description="Folder for database, media, logs and YouTube login (e.g. a Railway volume at /data). "
+        "Empty = the project folder.",
+    )
+    youtube_token_b64: str = Field(default="", description="token.pickle as base64 (for hosts without file upload)")
+    youtube_client_secrets_json: str = Field(default="", description="client_secrets.json content (raw JSON or base64)")
+
     # ── Derived paths ────────────────────────────────────────────────
     @property
     def base_dir(self) -> Path:
         return Path(__file__).resolve().parent.parent
 
     @property
+    def storage_root(self) -> Path:
+        return Path(self.storage_dir).expanduser().resolve() if self.storage_dir else self.base_dir
+
+    @property
+    def token_path(self) -> Path:
+        return self.storage_root / "token.pickle"
+
+    @property
+    def client_secrets_file(self) -> Path:
+        path = Path(self.youtube_client_secrets_path).expanduser()
+        if path.is_absolute():
+            return path
+        # Prefer the storage folder (where env-provided secrets are written), then the project.
+        candidate = self.storage_root / path
+        return candidate if candidate.exists() or self.youtube_client_secrets_json else self.base_dir / path
+
+    @property
     def generated_dir(self) -> Path:
-        return self.base_dir / "generated"
+        return self.storage_root / "generated"
 
     @property
     def scripts_dir(self) -> Path:
@@ -165,15 +191,15 @@ class Settings(BaseSettings):
 
     @property
     def logs_dir(self) -> Path:
-        return self.base_dir / "logs"
+        return self.storage_root / "logs"
 
     @property
     def data_dir(self) -> Path:
-        return self.base_dir / "data"
+        return self.storage_root / "data"
 
     @property
     def db_url(self) -> str:
-        db = self.base_dir / self.db_path
+        db = Path(self.db_path) if Path(self.db_path).is_absolute() else self.storage_root / self.db_path
         return f"sqlite+aiosqlite:///{db}"
 
     def ensure_directories(self) -> None:

@@ -1,0 +1,14 @@
+# Never bake secrets or local data into the image
+.env
+railway.env
+token.pickle
+client_secrets.json
+generated/
+data/
+logs/
+.git/
+venv/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

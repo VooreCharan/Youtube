@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.database import init_db
 from app.routers import generation, upload
 from app.scheduler.jobs import start_scheduler, shutdown_scheduler
+from app.utils.deploy_secrets import materialize_secret_files
 from app.utils.logger import setup_logging
 
 
@@ -26,6 +27,7 @@ from app.utils.logger import setup_logging
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle manager."""
     # ── Startup ──
+    materialize_secret_files()
     setup_logging()
     logger.info("Starting YouTube Automation API …")
 

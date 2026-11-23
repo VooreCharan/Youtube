@@ -80,23 +80,22 @@ def _run_ffmpeg_pipeline(
     # 1. Scale and pad to fit exactly (target_w x target_h)
     vf = f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
 
-    # 2. Burn subtitles if available
+    # 2. Burn subtitles if available. FFmpeg runs inside the subtitle folder and
+    #    references the file by name — avoids escaping drive letters, colons and
+    #    spaces in the subtitles filter, wherever storage lives.
+    run_dir = base_dir
     if subtitle_path and Path(subtitle_path).exists() and Path(subtitle_path).stat().st_size > 0:
-        # Use a relative path to avoid Windows drive-letter colon parsing bugs in the subtitles filter
-        try:
-            rel_sub = Path(subtitle_path).relative_to(base_dir).as_posix()
-        except ValueError:
-            # Fallback if not inside base_dir: we'd need to manually escape the colon
-            rel_sub = Path(subtitle_path).absolute().as_posix().replace(":", r"\:")
-        
-        # Subtitle styling: very small bold white text, translucent outline, anchored to bottom
-        font_size = 14
+        run_dir = Path(subtitle_path).resolve().parent
+        sub_name = Path(subtitle_path).name
+
         from app.utils.fonts import subtitle_font_family
 
         family = subtitle_font_family(language)
         font_name = f"FontName={family}," if family else ""
+        # Subtitle styling: small bold white text, translucent outline, anchored to bottom
+        font_size = 14
         style = f"{font_name}FontSize={font_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H99000000,BorderStyle=1,Outline=2.5,Shadow=0,Bold=-1,MarginV=10,Alignment=2"
-        vf += f",subtitles='{rel_sub}':force_style='{style}'"
+        vf += f",subtitles='{sub_name}':force_style='{style}'"
 
     cmd = [
         _FFMPEG_EXE,
@@ -118,7 +117,7 @@ def _run_ffmpeg_pipeline(
     logger.info("Executing FFmpeg for video {}:\n{}", video_id, " ".join(cmd))
     
     # Run synchronously (will be wrapped in to_thread)
-    res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(base_dir))
+    res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(run_dir))
     if res.returncode != 0:
         logger.error("FFmpeg failed with exit code {}:\n{}", res.returncode, res.stderr)
         raise RuntimeError(f"FFmpeg assembly failed: {res.stderr[-500:]}")

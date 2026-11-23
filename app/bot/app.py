@@ -24,6 +24,7 @@ from app.bot.pipeline import ffmpeg_available
 from app.config import get_settings
 from app.database import init_db
 from app.services.llm_service import build_chain
+from app.utils.deploy_secrets import materialize_secret_files
 from app.utils.logger import setup_logging
 
 
@@ -38,7 +39,7 @@ async def _post_init(app: Application) -> None:
         )
     if not ffmpeg_available():
         logger.warning("FFmpeg not found — video rendering will fail until it is installed.")
-    if not (settings.base_dir / "token.pickle").exists():
+    if not settings.token_path.exists():
         logger.warning("YouTube is not connected yet — run `python -m app.youtube_auth` once before publishing.")
     chain = build_chain()
     if chain:
@@ -83,6 +84,7 @@ def build_application() -> Application:
 
 
 def main() -> None:
+    materialize_secret_files()  # YouTube files from env vars (Railway)
     setup_logging()
     get_settings().ensure_directories()
     logger.info("Starting Telegram bot …")

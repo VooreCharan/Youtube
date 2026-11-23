@@ -211,6 +211,30 @@ streamlit run dashboard/streamlit_app.py
 
 ---
 
+## 🚂 Deploy on Railway
+
+The bot runs as one always-on service, built from the `Dockerfile`. `railway.json` tells Railway to start `python -m app.bot`.
+
+1. **On your Mac, connect YouTube once** (creates `token.pickle`):
+   ```bash
+   python -m app.youtube_auth
+   ```
+2. **Build the variables file** from `.env`, `token.pickle` and `client_secrets.json`:
+   ```bash
+   python -m app.export_railway_env      # writes railway.env (git-ignored, contains secrets)
+   ```
+3. **On railway.com:** **New Project → Deploy from GitHub repo**, and pick this repository.
+4. **Variables → Raw Editor:** paste the whole contents of `railway.env`, then save.
+5. **Add a volume:** right-click the service → **Attach volume**, mount path **`/data`**. It keeps the database, videos and the refreshed YouTube login across deploys.
+6. **Deploy.** The logs should show `🤖 Telegram bot @YourBot is running`.
+7. **Stop any other copy** of the bot (e.g. on your laptop). Telegram allows only one at a time.
+
+Each push to `main` redeploys automatically. After changing `.env` or logging in to YouTube again, rerun step 2 and paste the variables again.
+
+> Keep the service at **1 replica**: two copies of a Telegram bot conflict.
+
+---
+
 ## 🐳 Docker
 
 ```bash
