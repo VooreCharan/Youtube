@@ -70,17 +70,29 @@ def _run_gtts(text: str, lang: str, output_path: Path) -> None:
     gTTS(text=text, lang=lang, slow=False).save(str(output_path))
 
 
-async def _edge(text: str, voice: str, output_path: Path) -> None:
+async def _edge(text: str, voice: str, output_path: Path) -> list:
+    """Render with Edge-TTS; returns sentence timings as caption Segments."""
     import edge_tts
 
-    await edge_tts.Communicate(text, voice).save(str(output_path))
+    from app.services.captions_service import Segment
+
+    segments = []
+    with open(output_path, "wb") as audio:
+        async for chunk in edge_tts.Communicate(text, voice, boundary="SentenceBoundary").stream():
+            if chunk["type"] == "audio":
+                audio.write(chunk["data"])
+            elif chunk["type"] in ("SentenceBoundary", "WordBoundary"):
+                start = chunk["offset"] / 10_000_000  # 100-ns ticks → seconds
+                segments.append(Segment(start, start + chunk["duration"] / 10_000_000, chunk["text"]))
+    return segments
 
 
-async def synthesize(text: str, voice: str, output_path: Path) -> str:
+async def synthesize(text: str, voice: str, output_path: Path) -> Tuple[str, Optional[list]]:
     """
     Render *text* with *voice* to *output_path* (MP3).
 
-    Returns the voice actually used (may differ if a fallback engine was needed).
+    Returns ``(voice actually used, sentence timings or None)``. The voice may
+    differ if a fallback engine was needed; timings are only available from Edge-TTS.
     """
     language = language_from_voice(voice)
     neural_fallback = language.voices[0].id if language.voices else None
@@ -97,15 +109,16 @@ async def synthesize(text: str, voice: str, output_path: Path) -> str:
     errors = []
     for engine, v in attempts:
         try:
+            timings = None
             if engine == "edge":
-                await _edge(text, v, output_path)
+                timings = await _edge(text, v, output_path)
             else:
                 await asyncio.to_thread(_run_gtts, text, language.code, output_path)
             if not output_path.exists() or output_path.stat().st_size == 0:
                 raise RuntimeError("engine produced an empty file")
             if v != voice:
                 logger.warning("TTS fell back from '{}' to '{}'", voice, v)
-            return v
+            return v, timings or None
         except Exception as exc:  # noqa: BLE001 — try the next engine
             logger.warning("TTS engine {} failed for voice '{}': {}", engine, v, exc)
             errors.append(f"{engine}({v}): {exc}")
@@ -137,8 +150,17 @@ async def generate_audio(
     output_path = settings.audio_dir / f"{video_id}.mp3"
     logger.info("Generating narration for Video id={} with voice '{}'", video_id, selected_voice)
 
-    used_voice = await synthesize(narration, selected_voice, output_path)
+    used_voice, timings = await synthesize(narration, selected_voice, output_path)
     logger.info("Narration saved: {} ({:.1f} KB)", output_path, output_path.stat().st_size / 1024)
+
+    # Exact sentence timings make the best captions; without them (gTTS) the
+    # subtitle step falls back to transcribing the audio.
+    from app.services import captions_service
+
+    if timings:
+        captions_service.save_timing(video_id, timings)
+    else:
+        captions_service.clear_timing(video_id)
 
     video.audio_path = str(output_path)
     video.voice = used_voice
@@ -163,7 +185,7 @@ async def generate_voice_samples(text: str, language: Language) -> List[Tuple[Vo
         if path.exists() and path.stat().st_size > 0:
             return voice, path
         try:
-            used = await synthesize(text, voice.id, path)
+            used, _ = await synthesize(text, voice.id, path)
             if used != voice.id:  # don't present a fallback as if it were this voice
                 path.unlink(missing_ok=True)
                 return None

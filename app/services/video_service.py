@@ -192,7 +192,7 @@ async def create_video(
                 target_h=target_h,
                 subtitle_path=video.subtitle_path,
                 base_dir=settings.base_dir,
-                language=video.language,
+                language="en",  # captions are always English (see captions_service)
             )
             
             # Cleanup temp concat file

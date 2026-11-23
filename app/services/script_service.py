@@ -64,7 +64,7 @@ IMPORTANT:
 
 _METADATA_PROMPT = """You are a YouTube SEO expert. Below is the narration of a video (written by the creator — do NOT rewrite it).
 
-Narration language: {language}
+Narration language: {language} (the text below may be an English translation of it)
 Narration:
 \"\"\"
 {script}

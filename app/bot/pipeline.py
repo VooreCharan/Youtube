@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.database import async_session_factory
 from app.models.video import Video
 from app.services import (
+    captions_service,
     image_service,
     script_service,
     subtitle_service,
@@ -85,6 +86,7 @@ async def replace_script_text(video_id: int, text: str) -> Video:
         video.script = text.strip()
         video.audio_path = None
         video.subtitle_path = None
+        captions_service.clear_timing(video_id)
         await db.commit()
         await db.refresh(video)
         return video
@@ -118,28 +120,45 @@ async def narrate(video_id: int, voice_id: str) -> Video:
 
 async def use_own_audio(video_id: int, audio_file: Path) -> Video:
     """
-    Store an uploaded narration: transcribe it (for subtitles, metadata and
-    visuals) and generate the title/description/tags from the transcript.
+    Store an uploaded narration: detect its language, build timed English
+    captions, and generate the title/description/tags from what is said.
     """
-    settings = get_settings()
     async with async_session_factory() as db:
         video = await db.get(Video, video_id)
 
         segments, lang_code = await subtitle_service.transcribe(audio_file)
         transcript = " ".join(s.text.strip() for s in segments).strip()
-        if not transcript:
+        language = get_language(lang_code)
+
+        english = None
+        if language.code != "en":
+            english = await subtitle_service.translate_speech_to_english(audio_file)
+
+        if english:
+            # Fix speech-translation slips now, so the title/description are built from clean text.
+            english = await captions_service.polish_english(
+                [captions_service.Segment(s.start, s.end, s.text) for s in english], language.code
+            )
+            captions_service.save_timing(video_id, english, language="en")
+            # The speech translation is complete even when the transcript is not
+            # (some languages get cut short), so metadata is written from it.
+            content = " ".join(s.text for s in english)
+        else:
+            captions_service.save_timing(
+                video_id,
+                [captions_service.Segment(s.start, s.end, s.text.strip()) for s in segments if s.text.strip()],
+            )
+            content = transcript
+
+        if not content:
             raise RuntimeError("I couldn't hear any speech in that audio file.")
 
-        srt_path = settings.subtitles_dir / f"{video_id}.srt"
-        srt_path.write_text(subtitle_service.segments_to_srt(segments), encoding="utf-8")
-
-        language = get_language(lang_code)
         video.language = language.code
         video.audio_path = str(audio_file)
-        video.subtitle_path = str(srt_path)
+        video.subtitle_path = None
         await db.flush()
 
-        video = await script_service.apply_user_script(db, video_id, transcript, language.name)
+        video = await script_service.apply_user_script(db, video_id, content, language.name)
         await db.commit()
         return video
 

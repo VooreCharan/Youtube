@@ -72,7 +72,11 @@ class Settings(BaseSettings):
     pexels_api_key: str = Field(default="")
 
     # ── Whisper ──────────────────────────────────────────────────────
-    whisper_model_size: str = Field(default="base")
+    whisper_model_size: str = Field(default="base", description="Local fallback model")
+    groq_whisper_model: str = Field(
+        default="whisper-large-v3",
+        description="Hosted speech-to-text on Groq (used first when GROQ_API_KEY is set; empty = local only)",
+    )
 
     # ── TTS ──────────────────────────────────────────────────────────
     default_voice: str = Field(default="en-US-AvaNeural")
