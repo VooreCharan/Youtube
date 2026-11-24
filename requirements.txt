@@ -22,6 +22,7 @@ python-telegram-bot==21.6
 
 # Video Processing
 moviepy==1.0.3
+imageio-ffmpeg>=0.5        # bundled FFmpeg binary (no system install needed)
 Pillow==10.4.0
 opencv-python-headless==4.10.0.84
 
