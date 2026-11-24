@@ -87,6 +87,8 @@ async def replace_script_text(video_id: int, text: str) -> Video:
         video.audio_path = None
         video.subtitle_path = None
         captions_service.clear_timing(video_id)
+        await db.flush()
+        video = await _check_facts(db, video_id) or video
         await db.commit()
         await db.refresh(video)
         return video
@@ -95,8 +97,18 @@ async def replace_script_text(video_id: int, text: str) -> Video:
 async def use_own_script(video_id: int, text: str, language: Language) -> Video:
     async with async_session_factory() as db:
         video = await script_service.apply_user_script(db, video_id, text, language.name)
+        video = await _check_facts(db, video_id) or video
         await db.commit()
         return video
+
+
+async def _check_facts(db, video_id: int) -> Optional[Video]:
+    """Fact-check a user-written script (report only). Never blocks the flow."""
+    try:
+        return await script_service.check_script(db, video_id)
+    except Exception as exc:  # noqa: BLE001 — a failed check must not lose the user's script
+        logger.warning("Fact-check of user script failed for video {}: {}", video_id, exc)
+        return None
 
 
 # ── Voice ───────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 from contextlib import suppress
 from typing import Any, Awaitable, Callable, Optional
 
@@ -29,6 +30,7 @@ from app.config import get_settings
 from app.services import trends_service
 from app.services.languages import get_language
 from app.services.llm_service import LLMUnavailableError
+from app.services.research_service import FactCheck
 from app.services.youtube_service import YouTubeAuthRequired
 
 h = html.escape
@@ -429,7 +431,7 @@ async def _generate_script(chat_id, session: Session, context, regenerate: bool)
     video = await run_step(
         context,
         chat_id,
-        f"{verb} your script in {h(language.name)}… (about a minute)",
+        f"Researching sources, {verb.lower()} and fact-checking your {h(language.name)} script… (1–2 minutes)",
         lambda report: pipeline.write_script(session.video_id, regenerate=regenerate),
         retry="script:regen",
     )
@@ -445,15 +447,47 @@ async def send_script(chat_id, video, context) -> None:
         f"📝 <b>{h(video.title or video.topic)}</b>\n"
         f"🌐 {h(language.name)} · {words} words · ~{minutes} min\n\n"
     )
-    chunks = _chunks(video.script or "")
-    for i, chunk in enumerate(chunks):
-        last = i == len(chunks) - 1
-        await context.bot.send_message(
-            chat_id,
-            (header if i == 0 else "") + h(chunk) + ("\n\n👉 <b>Approve this script?</b>" if last else ""),
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb.script_review() if last else None,
-        )
+    for i, chunk in enumerate(_chunks(video.script or "")):
+        await context.bot.send_message(chat_id, (header if i == 0 else "") + h(chunk), parse_mode=ParseMode.HTML)
+
+    await context.bot.send_message(
+        chat_id,
+        fact_summary(video) + "\n\n👉 <b>Approve this script?</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.script_review(),
+        disable_web_page_preview=True,
+    )
+
+
+def fact_summary(video) -> str:
+    """Fact-check result and sources, formatted for Telegram."""
+    check = FactCheck.from_json(getattr(video, "fact_check", None))
+    sources = json.loads(video.sources) if getattr(video, "sources", None) else []
+
+    if check is None or not check.checked:
+        reason = (check.error if check and check.error else "no sources could be found for this topic")
+        lines = [f"⚠️ <b>Not fact-checked</b> — {h(reason)}."]
+    elif not check.unsupported:
+        lines = [f"✅ <b>Fact-checked</b> against {check.sources} sources — every fact is supported."]
+        if check.corrected:
+            lines.append(f"🛠 {check.corrected} unsupported statement(s) were corrected or removed automatically.")
+    else:
+        lines = [f"⚠️ <b>{len(check.unsupported)} statement(s) could not be verified</b> against {check.sources} sources:"]
+        for issue in check.unsupported[:5]:
+            quote = issue["quote"] if len(issue["quote"]) <= 160 else issue["quote"][:160] + "…"
+            lines.append(f"• “{h(quote)}”" + (f"\n   <i>{h(issue.get('problem', ''))}</i>" if issue.get("problem") else ""))
+        lines.append("You can regenerate, edit it, or approve anyway.")
+
+    if sources:
+        lines.append("\n📚 <b>Sources</b>")
+        for src in sources[:6]:
+            label = h(src.get("title", "")[:90])
+            meta = ", ".join(x for x in (src.get("publisher"), src.get("published")) if x)
+            link = f'<a href="{h(src["url"], quote=True)}">{label}</a>' if src.get("url") else label
+            lines.append(f"• {link}" + (f" — {h(meta)}" if meta else ""))
+        if len(sources) > 6:
+            lines.append(f"…and {len(sources) - 6} more (all listed in the YouTube description).")
+    return "\n".join(lines)
 
 
 async def _script_action(arg, chat_id, session: Session, context) -> None:
@@ -679,9 +713,14 @@ async def _handle_text(text, chat_id, session: Session, context, update) -> None
         if len(text.split()) < 20:
             await update.message.reply_text("That looks too short for a full script — please send the whole edited script.")
             return
-        video = await pipeline.replace_script_text(session.video_id, text)
         session.step = Step.REVIEW_SCRIPT
-        await send_script(chat_id, video, context)
+        video = await run_step(
+            context, chat_id, "Fact-checking your edited script…",
+            lambda report: pipeline.replace_script_text(session.video_id, text),
+            retry="script:regen",
+        )
+        if video is not _FAILED:
+            await send_script(chat_id, video, context)
         return
 
     if session.step == Step.AWAIT_SCRIPT_TEXT:
@@ -714,7 +753,7 @@ async def _own_script_received(text, chat_id, session: Session, context, update)
     video = await run_step(
         context,
         chat_id,
-        "Reading your script and preparing title, description and visuals…",
+        "Reading your script, preparing title and visuals, and fact-checking it… (about a minute)",
         lambda report: pipeline.use_own_script(session.video_id, text, language),
     )
     if video is _FAILED:
@@ -723,8 +762,10 @@ async def _own_script_received(text, chat_id, session: Session, context, update)
 
     await context.bot.send_message(
         chat_id,
-        f"✅ Got it — <b>{h(video.title or '')}</b>\n{len(text.split())} words.",
+        f"✅ Got it — <b>{h(video.title or '')}</b>\n{len(text.split())} words.\n\n{fact_summary(video)}"
+        "\n\n<i>Your script is used exactly as written. To change it, say hi and paste a corrected version.</i>",
         parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
     )
     await show_voices(chat_id, session, context)
 

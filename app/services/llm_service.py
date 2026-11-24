@@ -131,7 +131,9 @@ class _Failure:
     transient: bool       # worth retrying after a short pause (overload, rate limit, timeout)
 
 
-_NO_CREDIT_MARKERS = ("insufficient_quota", "credit_balance", "no credits", "billing")
+# Phrases that mean "this account has no money". Deliberately specific: ordinary
+# rate-limit messages often link to billing pages (e.g. Groq's "upgrade" hint).
+_NO_CREDIT_MARKERS = ("insufficient_quota", "credit_balance", "no credits remaining", "exceeded your current quota")
 
 
 def _is_out_of_credits(exc: Exception) -> bool:

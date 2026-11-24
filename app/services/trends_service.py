@@ -49,8 +49,11 @@ CATEGORIES: Dict[str, Category] = {
         Category("entertainment", "Entertainment", "🎬", news_section="ENTERTAINMENT"),
         Category("sports", "Sports", "🏏", news_section="SPORTS"),
         Category("world", "World News", "🌍", news_section="WORLD"),
+        Category("space", "Space", "🚀", search_query="NASA OR ISRO OR ESA OR space mission OR astronomers"),
+        Category("history", "History", "🏛", search_query="archaeologists OR historians OR ancient discovery"),
+        Category("nature", "Animals & Nature", "🐾", search_query="new species OR wildlife study OR scientists animals"),
+        Category("body", "Human Body", "🧠", search_query="study finds human brain OR body OR sleep research"),
         Category("education", "Education", "📚", search_query="education OR exam OR students"),
-        Category("motivation", "Self-Improvement", "🚀", search_query="productivity OR habits OR success story"),
     ]
 }
 
@@ -106,10 +109,13 @@ Audience language: {language}
 Today's latest headlines in this category:
 {headlines}
 
-Suggest {count} fresh, specific YouTube video topics based on what is trending right now{headline_hint}.
-Each topic must work as a 5-8 minute explainer or story video.
+Suggest {count} fresh, specific YouTube video topics for a FACT-BASED channel, based on what is
+trending right now{headline_hint}. Each topic must work as a 4-7 minute factual explainer.
 
 Rules:
+- Topics must be about verifiable facts, events, discoveries or explanations — no rumours, gossip,
+  predictions presented as fact, or opinion pieces.
+- Titles must be accurate: they may be intriguing, but must not promise anything the facts don't support.
 - Write every "title" in {language}.
 - Titles: punchy, curiosity-driven, max 90 characters.
 - "why" is one short English sentence on why this will get views now.

@@ -49,6 +49,10 @@ _CATEGORY_MAP = {
     "World News": "25",
     "Education": "27",
     "Self-Improvement": "26",
+    "Space": "28",
+    "History": "27",
+    "Animals & Nature": "15",
+    "Human Body": "27",
 }
 
 
@@ -172,13 +176,24 @@ def _build_upload_body(video: Video) -> dict:
     description = video.description or ""
     if video.chapters:
         description += f"\n\n📋 Chapters:\n{video.chapters}"
+    sources = json_loads_safe(video.sources, [])
+    if sources:
+        lines = []
+        for src in sources[:10]:
+            label = src.get("title", "")
+            if src.get("publisher") and src.get("publisher") != "Wikipedia":
+                label += f" ({src['publisher']}{', ' + src['published'] if src.get('published') else ''})"
+            lines.append(f"• {label}: {src.get('url', '')}" if src.get("url") else f"• {label}")
+        sources_block = "\n\n📚 Sources:\n" + "\n".join(lines)
+    else:
+        sources_block = ""
     if hashtags:
         description += "\n\n" + " ".join(hashtags)
 
     body = {
         "snippet": {
             "title": (video.title or video.topic)[:100],
-            "description": description[:5000],
+            "description": (description[: 5000 - len(sources_block)] + sources_block)[:5000],
             "tags": tags[:500] if tags else [],
             "categoryId": _CATEGORY_MAP.get(video.category, "22"),
         },

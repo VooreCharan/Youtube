@@ -49,6 +49,8 @@ class Video(Base):
     language = Column(String(10), nullable=True)          # e.g. "en", "te"
     source = Column(String(20), nullable=True)            # topic | script | audio | api
     telegram_chat_id = Column(String(50), nullable=True)  # chat that owns this video
+    sources = Column(Text, nullable=True)                 # JSON list of {title, url, publisher, published, kind}
+    fact_check = Column(Text, nullable=True)              # JSON FactCheck result
 
     # Timestamps
     created_at = Column(

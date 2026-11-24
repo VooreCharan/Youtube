@@ -18,28 +18,42 @@ from loguru import logger
 from app.config import get_settings
 from app.models.video import Video
 from app.services.languages import get_language, language_from_voice
+from app.services import research_service
 from app.services.llm_service import call_llm_json
 
 
-_SCRIPT_PROMPT = """You are a professional YouTube scriptwriter. Create a complete, engaging video script for the following topic.
+_SCRIPT_PROMPT = """You are a scriptwriter for a FACT-BASED YouTube channel. Viewers trust this channel
+because every fact in it is accurate and verifiable.
 
 Today's date: {today} (write as of this date; do not present past years as the future)
 Topic: {topic}
 Category: {category}
 Language: {language} (You MUST write the narration in this exact language!)
 
+SOURCES (the ONLY facts you may use):
+{sources}
+
+FACT RULES (most important):
+- Every specific fact (numbers, dates, names, places, events, quotes, records, "first/largest" claims)
+  MUST come from the SOURCES above. Never invent or guess facts, statistics or quotes.
+- If the sources don't cover something, leave it out. A shorter accurate script beats a longer invented one.
+- Mention when something happened (e.g. "In March 2026, …") and who reported it when it matters.
+- Clearly separate facts from interpretation ("experts say", "this could mean") and never present
+  speculation or rumours as fact.
+- General, uncontroversial background knowledge (what a satellite is, how rain forms) is allowed.
+
 Requirements:
-1. The script should be for a 5-8 minute narrated video: about 750-1000 words of narration in total,
-   roughly 120-180 words per scene. Do not write a short summary.
-2. Divide the script into 5-8 scenes/sections.
-3. Each scene should have clear narration text.
-4. Open with a strong hook in the first two sentences; end with a call to action.
-5. Generate SEO-optimized metadata.
+1. Aim for a 4-7 minute narrated video: about 600-1000 words of narration, 5-8 scenes — but only as long
+   as the sources support.
+2. Each scene should have clear narration text.
+3. Open with a strong, accurate hook (a surprising TRUE fact); end with a call to action.
+4. Generate SEO-optimized metadata. Title and description must be accurate — no clickbait claims
+   the video does not back up.
 
 Respond with a JSON object in this EXACT format:
 {{
-    "title": "An engaging, click-worthy YouTube title (max 100 chars)",
-    "description": "A compelling YouTube description (200-500 words) with relevant keywords. Include a brief summary, key points covered, and a call to action.",
+    "title": "Engaging but accurate YouTube title (max 100 chars)",
+    "description": "YouTube description (150-400 words): summary of the facts covered and a call to action. Do not include links.",
     "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8", "tag9", "tag10"],
     "hashtags": ["#hashtag1", "#hashtag2", "#hashtag3", "#hashtag4", "#hashtag5"],
     "chapters": "00:00 Introduction\\n00:45 Section Title\\n...",
@@ -53,11 +67,11 @@ Respond with a JSON object in this EXACT format:
 
 IMPORTANT:
 - The "title", "description" and "script" fields MUST be written in {language}.
-- The "script" field should contain ONLY the narration text (what will be spoken aloud).
+- The "script" field should contain ONLY the narration text (what will be spoken aloud) — no source
+  numbers, brackets or URLs.
 - Each scene should start with "Scene N: Title" on its own line (the Scene header itself must be in English).
 - image_prompts must be in ENGLISH and extremely short (1-3 words max) generic search terms suitable for a stock video API (e.g., "business meeting", "city skyline", "bmw driving"). Do NOT write long sentences.
 - Generate one image_prompt per scene.
-- Make the title attention-grabbing and curiosity-inducing.
 - Include relevant timestamps in chapters.
 {avoid}"""
 
@@ -83,7 +97,8 @@ Produce metadata for this video. Respond with a JSON object in this EXACT format
 
 _YT_CATEGORIES = [
     "Technology", "AI", "Business & Finance", "Science", "Health", "Entertainment",
-    "Sports", "World News", "Education", "Self-Improvement", "People & Blogs",
+    "Sports", "World News", "Space", "History", "Animals & Nature", "Human Body", "Education",
+    "Self-Improvement", "People & Blogs",
 ]
 
 
@@ -123,11 +138,18 @@ async def generate_script(
             "take a clearly different angle, structure and hook.\n"
         )
 
+    # Research once per video; "Regenerate" reuses the same sources.
+    sources = research_service.load_sources(video_id)
+    if sources is None:
+        sources = await research_service.gather_sources(video.topic, video.category, language)
+        research_service.save_sources(video_id, sources)
+
     prompt = _SCRIPT_PROMPT.format(
         today=date.today().strftime("%d %B %Y"),
         topic=video.topic,
         category=video.category,
         language=language.name,
+        sources=research_service.format_sources(sources),
         avoid=avoid,
     )
     data = await call_llm_json(
@@ -142,8 +164,13 @@ async def generate_script(
         raise RuntimeError(video.error_message)
 
     _apply_metadata(video, data)
-    video.script = str(data.get("script", ""))
+    script, check = await research_service.verify_script(
+        str(data.get("script", "")), sources, language.name, fix=True
+    )
+    video.script = script
     video.chapters = str(data.get("chapters", "") or "")
+    video.sources = json.dumps(research_service.public_sources(sources), ensure_ascii=False)
+    video.fact_check = check.to_json()
     _save_script_file(video)
 
     video.upload_status = "pending"
@@ -198,6 +225,30 @@ async def apply_user_script(
     await db.refresh(video)
 
     logger.info("User script stored for Video id={} ({} words, {} scenes)", video_id, words, scenes)
+    return video
+
+
+async def check_script(db: AsyncSession, video_id: int) -> Video:
+    """
+    Fact-check a script the user wrote or edited. Their words are never
+    changed; unsupported statements are only reported back.
+    """
+    video = await db.get(Video, video_id)
+    if video is None:
+        raise ValueError(f"Video {video_id} not found")
+    language = _language_for(video)
+
+    sources = research_service.load_sources(video_id)
+    if sources is None:
+        topic = video.title or video.topic
+        sources = await research_service.gather_sources(topic, video.category, language)
+        research_service.save_sources(video_id, sources)
+
+    _, check = await research_service.verify_script(video.script or "", sources, language.name, fix=False)
+    video.sources = json.dumps(research_service.public_sources(sources), ensure_ascii=False)
+    video.fact_check = check.to_json()
+    await db.flush()
+    await db.refresh(video)
     return video
 
 
