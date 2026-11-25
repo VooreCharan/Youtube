@@ -63,6 +63,31 @@ def _build_concat_file(image_paths: list[str], duration_per_image: float, concat
     concat_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+VOICE_LUFS = -16.0  # narration loudness (YouTube normalises playback to about -14 LUFS)
+
+
+def _music_args(music_path: Path | None, level_db: float, duration: float) -> list:
+    """
+    Audio mix: narration normalised to VOICE_LUFS; optional background music
+    normalised to *level_db* below the voice (whatever the track's own
+    loudness), faded in, ducked further while the narrator speaks
+    (sidechain compression) and faded out over the last 2 seconds.
+    """
+    voice = f"[1:a]loudnorm=I={VOICE_LUFS}:TP=-1.5:LRA=11"
+    if not music_path or not Path(music_path).exists():
+        return ["-filter_complex", f"{voice}[aout]", "-map", "0:v", "-map", "[aout]"]
+    fade_out = max(0.0, duration - 2.0)
+    graph = (
+        f"{voice},asplit=2[voice][key];"
+        f"[2:a]loudnorm=I={VOICE_LUFS - level_db}:TP=-2:LRA=11,afade=t=in:d=1.5[music];"
+        "[music][key]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[ducked];"
+        "[voice][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+        f"afade=t=out:st={fade_out:.2f}:d=2[aout]"
+    )
+    return ["-stream_loop", "-1", "-i", str(music_path),
+            "-filter_complex", graph, "-map", "0:v", "-map", "[aout]"]
+
+
 def _run_ffmpeg_pipeline(
     video_id: int,
     concat_path: Path,
@@ -73,6 +98,9 @@ def _run_ffmpeg_pipeline(
     subtitle_path: str | None,
     base_dir: Path,
     language: str | None = None,
+    music_path: Path | None = None,
+    music_level_db: float = 18.0,
+    duration: float = 0.0,
 ) -> None:
     """Execute the final FFmpeg render command."""
     
@@ -110,6 +138,7 @@ def _run_ffmpeg_pipeline(
         "-f", "concat", "-safe", "0",           # Use concat demuxer for images
         "-i", str(concat_path),
         "-i", str(audio_path),                  # Audio input
+        *_music_args(music_path, music_level_db, duration),
         "-vf", vf,                              # Video filters (scale/pad/subtitles)
         "-c:v", "libx264",                      # H.264 video codec
         "-preset", "fast",                      # Fast encoding
@@ -134,6 +163,7 @@ async def create_video(
     db: AsyncSession,
     video_id: int,
     video_format: str | None = None,
+    music_path: Path | None = None,
 ) -> str:
     """
     Assemble a final MP4 video from generated images, audio, and subtitles.
@@ -199,6 +229,9 @@ async def create_video(
                 subtitle_path=video.subtitle_path,
                 base_dir=settings.base_dir,
                 language="en",  # captions are always English (see captions_service)
+                music_path=music_path,
+                music_level_db=settings.music_level_db,
+                duration=duration,
             )
             
             # Cleanup temp concat file

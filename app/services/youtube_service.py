@@ -176,6 +176,12 @@ def _build_upload_body(video: Video) -> dict:
     description = video.description or ""
     if video.chapters:
         description += f"\n\n📋 Chapters:\n{video.chapters}"
+    from app.services.music_service import credit_for
+
+    music_credit = credit_for(video.music)
+    if music_credit:
+        description += f"\n\n🎵 Music: {music_credit}"
+
     sources = json_loads_safe(video.sources, [])
     if sources:
         lines = []

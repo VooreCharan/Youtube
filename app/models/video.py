@@ -50,7 +50,8 @@ class Video(Base):
     source = Column(String(20), nullable=True)            # topic | script | audio | api
     telegram_chat_id = Column(String(50), nullable=True)  # chat that owns this video
     topic_en = Column(String(500), nullable=True)        # English meaning of the topic (used for research)
-    target_seconds = Column(Integer, nullable=True)       # requested length (Shorts: ≤ 59)
+    target_seconds = Column(Integer, nullable=True)
+    music = Column(String(300), nullable=True)            # music track key, "none", or NULL (not chosen yet)       # requested length (Shorts: ≤ 59)
     sources = Column(Text, nullable=True)                 # JSON list of {title, url, publisher, published, kind}
     fact_check = Column(Text, nullable=True)              # JSON FactCheck result
 

@@ -8,6 +8,7 @@ leaves half-written state. Handlers never touch the services directly.
 from __future__ import annotations
 
 import asyncio
+import random
 import shutil
 import subprocess
 from pathlib import Path
@@ -20,6 +21,7 @@ from app.database import async_session_factory
 from app.models.video import Video
 from app.services import (
     captions_service,
+    music_service,
     image_service,
     script_service,
     subtitle_service,
@@ -222,7 +224,8 @@ async def build_video(video_id: int, fresh_visuals: bool = False) -> Video:
             await image_service.generate_images(db, video_id)
         if not video.subtitle_path or not Path(video.subtitle_path).exists():
             await subtitle_service.generate_subtitles(db, video_id)
-        await video_service.create_video(db, video_id)
+        await _ensure_music(video)
+        await video_service.create_video(db, video_id, music_path=_music_path(video))
         await thumbnail_service.generate_thumbnail(db, video_id)
 
         video = await db.get(Video, video_id)
@@ -231,6 +234,55 @@ async def build_video(video_id: int, fresh_visuals: bool = False) -> Video:
         video.upload_status = STATUS_AWAITING_APPROVAL
         await db.commit()
         return video
+
+
+async def _ensure_music(video: Video) -> None:
+    """Pick a track by mood the first time a video is built (if music is enabled)."""
+    if video.music is not None:
+        return
+    if not get_settings().enable_music:
+        video.music = music_service.NO_MUSIC
+        return
+    mood = await music_service.choose_mood(video.title or video.topic, video.category, video.script or "")
+    track = await music_service.pick(mood)
+    video.music = track.key if track else music_service.NO_MUSIC
+    logger.info("Music for video {}: {}", video.id, music_service.describe(video.music))
+
+
+def _music_path(video: Video) -> Optional[Path]:
+    track = music_service.resolve(video.music)
+    return track.path if track else None
+
+
+async def change_music(video_id: int, choice: str) -> Tuple[Video, Optional[Path]]:
+    """
+    *choice*: "next" (another track — same mood first, then other moods),
+    "none" (remove music) or "add" (pick music again after removing it).
+    Re-renders the video (visuals and captions are kept).
+    """
+    async with async_session_factory() as db:
+        video = await db.get(Video, video_id)
+        if choice == "none":
+            video.music = music_service.NO_MUSIC
+        elif choice == "add" or video.music in (None, music_service.NO_MUSIC):
+            video.music = None
+            await _ensure_music(video)
+        else:
+            current = music_service.resolve(video.music)
+            mood = current.mood if current else "inspiring"
+            track = None
+            for candidate_mood in [mood] + music_service.all_moods_cycle(mood):
+                tracks = await music_service.tracks_for(candidate_mood)
+                others = [t for t in tracks if t.key != video.music]
+                if others:
+                    track = random.choice(others)
+                    break
+            video.music = track.key if track else video.music
+        await video_service.create_video(db, video_id, music_path=_music_path(video))
+        video = await db.get(Video, video_id)
+        video.upload_status = STATUS_AWAITING_APPROVAL
+        await db.commit()
+    return video, await telegram_preview(video)
 
 
 async def telegram_preview(video: Video) -> Optional[Path]:

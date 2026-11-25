@@ -87,6 +87,8 @@ class Settings(BaseSettings):
 
     # ── Video ────────────────────────────────────────────────────────
     default_video_format: str = Field(default="horizontal")
+    enable_music: bool = Field(default=True, description="Add background music under the narration")
+    music_level_db: float = Field(default=18, description="How many dB the music sits below the voice (before ducking)")
 
     # ── Database ─────────────────────────────────────────────────────
     db_path: str = Field(default="data/youtube_automation.db")

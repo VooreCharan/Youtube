@@ -31,7 +31,7 @@ from app.config import get_settings
 from app.services import trends_service
 from app.services.languages import get_language
 from app.services.llm_service import LLMUnavailableError
-from app.services import script_service
+from app.services import music_service, script_service
 from app.services.research_service import FactCheck
 from app.services.tts_service import TooLongForShort
 from app.services.youtube_service import YouTubeAuthRequired
@@ -54,6 +54,7 @@ ALLOWED_STEPS = {
     "voice": {Step.CHOOSE_VOICE},
     "audio": {Step.REVIEW_AUDIO},
     "video": {Step.REVIEW_VIDEO},
+    "music": {Step.REVIEW_VIDEO},
 }
 
 
@@ -302,6 +303,8 @@ async def _dispatch(action, arg, chat_id, session: Session, context, update) -> 
         await publish(chat_id, session, context)
     elif action == "video" and arg == "regen":
         await build_video(chat_id, session, context, fresh_visuals=True)
+    elif action == "music":
+        await change_music(chat_id, session, context, arg)
 
 
 async def _navigate(where, chat_id, session: Session, context, update) -> None:
@@ -742,9 +745,21 @@ async def build_video(chat_id, session: Session, context, fresh_visuals: bool = 
     await send_video_for_review(chat_id, context, *result)
 
 
-async def send_video_for_review(chat_id, context, video, preview) -> None:
+async def change_music(chat_id, session: Session, context, choice: str) -> None:
+    status = {"none": "Removing the music…", "add": "Adding background music…"}.get(
+        choice, "Trying a different track…")
+    result = await run_step(
+        context, chat_id, status + " (re-rendering, about a minute)",
+        lambda report: pipeline.change_music(session.video_id, choice),
+        retry=f"music:{choice}", action=ChatAction.UPLOAD_VIDEO,
+    )
+    if result is not _FAILED:
+        await send_video_for_review(chat_id, context, *result, with_thumbnail=False)
+
+
+async def send_video_for_review(chat_id, context, video, preview, with_thumbnail: bool = True) -> None:
     settings = get_settings()
-    if video.thumbnail_path:
+    if video.thumbnail_path and with_thumbnail:
         with suppress(Exception), open(video.thumbnail_path, "rb") as fh:
             await context.bot.send_photo(
                 chat_id, photo=fh, caption=f"🖼 Thumbnail\n<b>{h(video.title or video.topic)}</b>",
@@ -753,15 +768,17 @@ async def send_video_for_review(chat_id, context, video, preview) -> None:
 
     caption = (
         f"🎬 <b>{h((video.title or video.topic)[:200])}</b>\n\n"
+        f"🎵 Music: {h(music_service.describe(video.music))}\n"
         f"Approve to publish on YouTube as <b>{h(settings.youtube_privacy)}</b>."
     )
+    has_music = music_service.resolve(video.music) is not None
     if preview is None:
         await context.bot.send_message(
             chat_id,
             caption + "\n\n⚠️ The video is too large to preview in Telegram. "
             f"It's saved on the server at <code>{h(video.video_path)}</code>.",
             parse_mode=ParseMode.HTML,
-            reply_markup=kb.video_review(),
+            reply_markup=kb.video_review(has_music),
         )
         return
 
@@ -772,7 +789,7 @@ async def send_video_for_review(chat_id, context, video, preview) -> None:
             caption=caption,
             parse_mode=ParseMode.HTML,
             supports_streaming=True,
-            reply_markup=kb.video_review(),
+            reply_markup=kb.video_review(has_music),
             write_timeout=600,
             read_timeout=600,
         )

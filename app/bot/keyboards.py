@@ -111,10 +111,15 @@ def audio_review() -> InlineKeyboardMarkup:
     ])
 
 
-def video_review() -> InlineKeyboardMarkup:
+def video_review(has_music: bool = True) -> InlineKeyboardMarkup:
+    music = (
+        [Btn("🎵 Different music", callback_data="music:next"), Btn("🔇 No music", callback_data="music:none")]
+        if has_music else [Btn("🎵 Add music", callback_data="music:add")]
+    )
     return InlineKeyboardMarkup([
         [Btn("🚀 Approve & publish to YouTube", callback_data="video:ok")],
         [Btn("🔄 New visuals", callback_data="video:regen")],
+        music,
         [CANCEL],
     ])
 
