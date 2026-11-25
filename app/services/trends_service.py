@@ -119,11 +119,12 @@ Rules:
 - Write every "title" in {language}.
 - Titles: punchy, curiosity-driven, max 90 characters.
 - "why" is one short English sentence on why this will get views now.
+- "title_en" is the exact English meaning of the title (same subject — e.g. the same planet, person, place).
 - Do NOT repeat or rephrase any of these already-shown topics:
 {exclude}
 
 Respond as a JSON array:
-[{{"title": "...", "why": "..."}}, ...]
+[{{"title": "...", "title_en": "...", "why": "..."}}, ...]
 """
 
 
@@ -166,7 +167,11 @@ async def suggest_topics(
         title = str(item.get("title", "")).strip().strip('"')
         if title and title.lower() not in seen:
             seen.add(title.lower())
-            topics.append({"title": title[:200], "why": str(item.get("why", "")).strip()[:200]})
+            topics.append({
+                "title": title[:200],
+                "title_en": str(item.get("title_en", "") or (title if language.code == "en" else "")).strip()[:200],
+                "why": str(item.get("why", "")).strip()[:200],
+            })
 
     if not topics:
         raise RuntimeError("The AI did not return any topic ideas. Please try again.")

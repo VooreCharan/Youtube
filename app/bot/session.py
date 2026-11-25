@@ -27,6 +27,8 @@ class Flow(str, Enum):
 class Step(str, Enum):
     IDLE = "idle"
     CHOOSE_LANGUAGE = "choose_language"
+    CHOOSE_LENGTH = "choose_length"
+    FIX_LENGTH = "fix_length"          # a Short came out too long: shorten or switch to long
     CHOOSE_CATEGORY = "choose_category"
     CHOOSE_TOPIC = "choose_topic"
     AWAIT_CUSTOM_TOPIC = "await_custom_topic"
@@ -49,6 +51,9 @@ class Session:
     shown_topics: List[str] = field(default_factory=list)   # every topic shown, to avoid repeats
     video_id: Optional[int] = None
     voices: List[Tuple[Voice, Path]] = field(default_factory=list)
+    target: Optional[int] = None       # seconds for long videos, pipeline.SHORT for Shorts
+    voice_index: Optional[int] = None  # chosen voice (to re-record after switching to long)
+    pending_text: Optional[str] = None # pasted script held while the user decides Short vs long
     # Held while a step runs, so double taps / extra messages can't start parallel work.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -62,6 +67,9 @@ class Session:
         self.shown_topics = []
         self.video_id = None
         self.voices = []
+        self.target = None
+        self.voice_index = None
+        self.pending_text = None
 
 
 _sessions: Dict[int, Session] = {}

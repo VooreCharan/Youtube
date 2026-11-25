@@ -31,11 +31,25 @@ from app.services.llm_service import call_llm_json
 
 _HEADERS = {"User-Agent": "YouTubeFactsBot/1.0 (educational video research)"}
 _WIKI_API = "https://en.wikipedia.org/w/api.php"
-_PASSAGE_BUDGET = 1800      # characters kept per Wikipedia article
-_TOTAL_BUDGET = 6000        # characters of source text sent to the AI (free tiers allow ~8k tokens/min)
-_MAX_WIKI_ARTICLES = 3
-_MAX_HEADLINES = 10
 _CHECK_CHUNK = 2200         # script characters fact-checked per request
+
+
+@dataclass(frozen=True)
+class _Depth:
+    passage: int    # characters kept per Wikipedia article
+    total: int      # characters of source text sent to the AI (free tiers allow ~8k tokens/min)
+    articles: int
+    headlines: int
+
+
+def _depth_for(target_seconds: Optional[int]) -> _Depth:
+    """Longer videos need more material to stay factual."""
+    t = target_seconds or 300
+    if t <= 240:
+        return _Depth(passage=1800, total=6000, articles=3, headlines=10)
+    if t <= 600:
+        return _Depth(passage=2200, total=9000, articles=4, headlines=12)
+    return _Depth(passage=2500, total=12000, articles=5, headlines=15)
 
 
 @dataclass
@@ -83,6 +97,7 @@ class FactCheck:
 _QUERY_PROMPT = """You prepare research for a fact-based YouTube video.
 Topic: {topic}
 Category: {category}
+All queries and titles must be about exactly this topic (same subject, place, person or object).
 
 Return JSON:
 {{"search_queries": ["2-3 short ENGLISH web search queries to find current news on this topic"],
@@ -90,8 +105,38 @@ Return JSON:
 """
 
 
-async def gather_sources(topic: str, category: str, language: Language) -> List[Source]:
+_TRANSLATE_TOPIC = """Translate this YouTube video topic into English. Keep names, places and
+objects exactly (for example Telugu "అంగారక గ్రహం" / Hindi "मंगल ग्रह" is the planet Mars).
+
+Topic: {topic}
+
+Return JSON: {{"english": "the English translation"}}
+"""
+
+# Models that translated Indian-language topics correctly in testing go first;
+# Groq's gpt-oss-120b confused planets (Mars → Venus).
+_TRANSLATION_PREFERENCE = ["gemini", "openrouter_free", "github", "groq"]
+
+
+async def english_topic(topic: str) -> str:
+    """English version of *topic* for research (unchanged if already English)."""
+    if sum(ch.isascii() for ch in topic) >= 0.9 * len(topic):
+        return topic
+    data = await call_llm_json(
+        _TRANSLATE_TOPIC.format(topic=topic),
+        validate=lambda d: isinstance(d, dict) and str(d.get("english", "")).strip(),
+        prefer=_TRANSLATION_PREFERENCE,
+    )
+    english = str(data["english"]).strip().strip('"')
+    logger.info("Topic translated for research: '{}' → '{}'", topic[:60], english)
+    return english
+
+
+async def gather_sources(
+    topic: str, category: str, language: Language, target_seconds: Optional[int] = None
+) -> List[Source]:
     """Collect Wikipedia passages and recent headlines relevant to *topic*."""
+    depth = _depth_for(target_seconds)
     plan = await call_llm_json(
         _QUERY_PROMPT.format(topic=topic, category=category),
         validate=lambda d: isinstance(d, dict) and d.get("search_queries"),
@@ -103,14 +148,14 @@ async def gather_sources(topic: str, category: str, language: Language) -> List[
 
     async with httpx.AsyncClient(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
         wiki, news = await asyncio.gather(
-            _wikipedia(client, wiki_titles, queries, keywords),
-            _news(client, queries, language, news_keywords),
+            _wikipedia(client, wiki_titles, queries, keywords, depth),
+            _news(client, queries, language, news_keywords, depth),
         )
 
     sources: List[Source] = []
     used = 0
     for src in wiki + news:
-        if used + len(src.text) > _TOTAL_BUDGET and sources:
+        if used + len(src.text) > depth.total and sources:
             continue
         used += len(src.text)
         src.id = len(sources) + 1
@@ -123,10 +168,10 @@ async def gather_sources(topic: str, category: str, language: Language) -> List[
     return sources
 
 
-async def _wikipedia(client, titles: List[str], queries: List[str], keywords: set) -> List[Source]:
+async def _wikipedia(client, titles: List[str], queries: List[str], keywords: set, depth: _Depth) -> List[Source]:
     found: List[str] = []
     for query in titles + queries:
-        if len(found) >= _MAX_WIKI_ARTICLES:
+        if len(found) >= depth.articles:
             break
         try:
             r = await client.get(_WIKI_API, params={
@@ -139,14 +184,14 @@ async def _wikipedia(client, titles: List[str], queries: List[str], keywords: se
             logger.warning("Wikipedia search failed for '{}': {}", query, exc)
 
     results: List[Source] = []
-    for title in found[:_MAX_WIKI_ARTICLES]:
+    for title in found[: depth.articles]:
         try:
             r = await client.get(_WIKI_API, params={
                 "action": "query", "prop": "extracts|info", "inprop": "url", "explaintext": 1,
                 "exsectionformat": "plain", "titles": title, "redirects": 1, "format": "json",
             })
             page = next(iter(r.json()["query"]["pages"].values()))
-            text = _relevant_passages(page.get("extract", ""), keywords, _PASSAGE_BUDGET)
+            text = _relevant_passages(page.get("extract", ""), keywords, depth.passage)
             if text:
                 results.append(Source(0, "wikipedia", page.get("title", title), page.get("fullurl", ""),
                                       publisher="Wikipedia", text=text))
@@ -155,7 +200,7 @@ async def _wikipedia(client, titles: List[str], queries: List[str], keywords: se
     return results
 
 
-async def _news(client, queries: List[str], language: Language, keywords: set) -> List[Source]:
+async def _news(client, queries: List[str], language: Language, keywords: set, depth: _Depth) -> List[Source]:
     editions = [("en-US", "US", "US:en")]
     if language.news not in editions:
         editions.append(language.news)
@@ -193,7 +238,7 @@ async def _news(client, queries: List[str], language: Language, keywords: set) -
                                     publisher=publisher, published=published,
                                     text=f"Headline ({publisher}, {published}): {title}"))
     items.sort(key=lambda s: s.published, reverse=True)
-    return items[:_MAX_HEADLINES]
+    return items[: depth.headlines]
 
 
 def _keywords(text: str) -> set:

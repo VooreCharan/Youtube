@@ -34,6 +34,21 @@ class Language:
     flag: str
     news: Tuple[str, str, str]     # Google News (hl, gl, ceid)
     voices: Tuple[Voice, ...] = field(default_factory=tuple)
+    # Narration pace for neural TTS, used to size scripts for a target duration.
+    # Agglutinative languages (Telugu, Tamil…) say more per word, so fewer words per minute.
+    words_per_minute: int = 140
+    counts_characters: bool = False  # Japanese has no spaces: pace is characters per minute
+
+    def units_for(self, seconds: float) -> int:
+        """Words (or characters) of narration that fit in *seconds*."""
+        return max(20, int(self.words_per_minute * seconds / 60))
+
+    @property
+    def unit_name(self) -> str:
+        return "characters" if self.counts_characters else "words"
+
+    def count_units(self, text: str) -> int:
+        return len("".join(text.split())) if self.counts_characters else len(text.split())
 
     @property
     def button_label(self) -> str:
@@ -62,65 +77,65 @@ LANGUAGES: Dict[str, Language] = {
             _v("en-GB-RyanNeural", "Ryan · UK · male"),
             _v("en-IN-NeerjaNeural", "Neerja · India · female"),
             _v("en-IN-PrabhatNeural", "Prabhat · India · male"),
-        )),
+        ), words_per_minute=145),
         Language("hi", "Hindi", "हिन्दी", "🇮🇳", ("hi", "IN", "IN:hi"), (
             _v("hi-IN-SwaraNeural", "Swara · female"),
             _v("hi-IN-MadhurNeural", "Madhur · male"),
-        )),
+        ), words_per_minute=120),
         Language("te", "Telugu", "తెలుగు", "🇮🇳", ("te", "IN", "IN:te"), (
             _v("te-IN-ShrutiNeural", "Shruti · female"),
             _v("te-IN-MohanNeural", "Mohan · male"),
-        )),
+        ), words_per_minute=92),
         Language("ta", "Tamil", "தமிழ்", "🇮🇳", ("ta", "IN", "IN:ta"), (
             _v("ta-IN-PallaviNeural", "Pallavi · female"),
             _v("ta-IN-ValluvarNeural", "Valluvar · male"),
-        )),
+        ), words_per_minute=86),
         Language("kn", "Kannada", "ಕನ್ನಡ", "🇮🇳", ("kn", "IN", "IN:kn"), (
             _v("kn-IN-SapnaNeural", "Sapna · female"),
             _v("kn-IN-GaganNeural", "Gagan · male"),
-        )),
+        ), words_per_minute=90),
         Language("ml", "Malayalam", "മലയാളം", "🇮🇳", ("ml", "IN", "IN:ml"), (
             _v("ml-IN-SobhanaNeural", "Sobhana · female"),
             _v("ml-IN-MidhunNeural", "Midhun · male"),
-        )),
+        ), words_per_minute=80),
         Language("bn", "Bengali", "বাংলা", "🇮🇳", ("bn", "IN", "IN:bn"), (
             _v("bn-IN-TanishaaNeural", "Tanishaa · female"),
             _v("bn-IN-BashkarNeural", "Bashkar · male"),
-        )),
+        ), words_per_minute=110),
         Language("mr", "Marathi", "मराठी", "🇮🇳", ("mr", "IN", "IN:mr"), (
             _v("mr-IN-AarohiNeural", "Aarohi · female"),
             _v("mr-IN-ManoharNeural", "Manohar · male"),
-        )),
+        ), words_per_minute=105),
         Language("gu", "Gujarati", "ગુજરાતી", "🇮🇳", ("gu", "IN", "IN:gu"), (
             _v("gu-IN-DhwaniNeural", "Dhwani · female"),
             _v("gu-IN-NiranjanNeural", "Niranjan · male"),
-        )),
+        ), words_per_minute=110),
         Language("es", "Spanish", "Español", "🇪🇸", ("es", "ES", "ES:es"), (
             _v("es-ES-ElviraNeural", "Elvira · Spain · female"),
             _v("es-ES-AlvaroNeural", "Álvaro · Spain · male"),
             _v("es-MX-DaliaNeural", "Dalia · Mexico · female"),
             _v("es-MX-JorgeNeural", "Jorge · Mexico · male"),
-        )),
+        ), words_per_minute=145),
         Language("fr", "French", "Français", "🇫🇷", ("fr", "FR", "FR:fr"), (
             _v("fr-FR-DeniseNeural", "Denise · female"),
             _v("fr-FR-HenriNeural", "Henri · male"),
-        )),
+        ), words_per_minute=145),
         Language("de", "German", "Deutsch", "🇩🇪", ("de", "DE", "DE:de"), (
             _v("de-DE-TanjaNeural", "Tanja · female"),
             _v("de-DE-ChristophNeural", "Christoph · male"),
-        )),
+        ), words_per_minute=125),
         Language("pt", "Portuguese", "Português", "🇧🇷", ("pt-BR", "BR", "BR:pt-419"), (
             _v("pt-BR-FranciscaNeural", "Francisca · Brazil · female"),
             _v("pt-BR-AntonioNeural", "Antônio · Brazil · male"),
-        )),
+        ), words_per_minute=145),
         Language("ar", "Arabic", "العربية", "🇸🇦", ("ar", "EG", "EG:ar"), (
             _v("ar-SA-ZariyahNeural", "Zariyah · female"),
             _v("ar-SA-HamedNeural", "Hamed · male"),
-        )),
+        ), words_per_minute=110),
         Language("ja", "Japanese", "日本語", "🇯🇵", ("ja", "JP", "JP:ja"), (
             _v("ja-JP-NanamiNeural", "Nanami · female"),
             _v("ja-JP-KeitaNeural", "Keita · male"),
-        )),
+        ), words_per_minute=330, counts_characters=True),
     ]
 }
 

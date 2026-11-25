@@ -23,6 +23,9 @@ class Settings(BaseSettings):
         "append ',openai,openrouter' to allow paid fallbacks.",
     )
     llm_timeout: float = Field(default=90, description="Seconds before a model is abandoned for the next one")
+    groq_max_tokens: int = Field(default=5000, description="Answer-length limit for Groq (free tier: 8k tokens/min)")
+    groq_tpm: int = Field(default=8000, description="Groq tokens-per-minute limit per model (free tier: 8000)")
+    groq_max_pace_wait: float = Field(default=25, description="Max seconds to wait for a Groq model's budget to refill")
     llm_max_wait: float = Field(default=240, description="Total seconds one request may spend across the whole chain")
     llm_retry_rounds: int = Field(default=2, description="Extra passes over temporarily failing models")
     llm_retry_delay: float = Field(default=8, description="Seconds to wait before an extra pass")

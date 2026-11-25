@@ -36,6 +36,8 @@ TELEGRAM_UPLOAD_LIMIT = 49 * 1024 * 1024
 # …and download files up to 20 MB.
 TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024
 
+SHORT = -1  # create_video(target=SHORT) → vertical Short under one minute
+
 STATUS_AWAITING_APPROVAL = "awaiting_approval"
 STATUS_CANCELLED = "cancelled"
 
@@ -55,19 +57,38 @@ async def create_video(
     language: Language,
     source: str,
     chat_id: int,
+    target: Optional[int] = None,
+    topic_en: Optional[str] = None,
 ) -> int:
+    """*target*: seconds for long videos, ``SHORT`` for a vertical Short, None = default length."""
+    short = target == SHORT
     async with async_session_factory() as db:
         video = await topic_service.generate_topic(
             db,
             category=category,
             user_topic=topic,
             voice=language.voices[0].id if language.voices else None,
+            video_format="vertical" if short else "horizontal",
             language=language.code,
             source=source,
             telegram_chat_id=str(chat_id),
         )
+        video.target_seconds = script_service.SHORT_MAX_SECONDS if short else target
+        video.topic_en = topic_en or None
         await db.commit()
         return video.id
+
+
+async def make_long(video_id: int) -> Video:
+    """Turn a Short into a regular horizontal video (keeps the script)."""
+    async with async_session_factory() as db:
+        video = await db.get(Video, video_id)
+        video.video_format = "horizontal"
+        if video.target_seconds and video.target_seconds <= 60:
+            video.target_seconds = None
+        video.image_paths = None  # landscape footage needed
+        await db.commit()
+        return video
 
 
 # ── Script ──────────────────────────────────────────────────────────
@@ -122,10 +143,20 @@ async def voice_samples(video_id: int) -> List[Tuple[Voice, Path]]:
 
 
 async def narrate(video_id: int, voice_id: str) -> Video:
+    """Record the voice-over. Shorts are kept under a minute (raises TooLongForShort)."""
     async with async_session_factory() as db:
-        await tts_service.generate_audio(db, video_id, voice=voice_id)
+        video = await db.get(Video, video_id)
+        short = script_service.is_short(video)
+        await tts_service.generate_audio(
+            db, video_id, voice=voice_id,
+            max_seconds=script_service.SHORT_MAX_SECONDS if short else None,
+        )
+        video = await db.get(Video, video_id)
+        if not short:
+            duration = await asyncio.to_thread(video_service._get_audio_duration, Path(video.audio_path))
+            video.chapters = script_service.compute_chapters(video.script, duration)
         await db.commit()
-        return await db.get(Video, video_id)
+        return video
 
 
 # ── User-provided audio ─────────────────────────────────────────────
@@ -168,6 +199,12 @@ async def use_own_audio(video_id: int, audio_file: Path) -> Video:
         video.language = language.code
         video.audio_path = str(audio_file)
         video.subtitle_path = None
+        if script_service.is_short(video):
+            duration = await asyncio.to_thread(video_service._get_audio_duration, audio_file)
+            if duration > script_service.SHORT_MAX_SECONDS + 0.5:
+                # Too long for a Short: make a regular video instead (handler tells the user).
+                video.video_format = "horizontal"
+                video.target_seconds = None
         await db.flush()
 
         video = await script_service.apply_user_script(db, video_id, content, language.name)

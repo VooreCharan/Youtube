@@ -190,9 +190,17 @@ def _build_upload_body(video: Video) -> dict:
     if hashtags:
         description += "\n\n" + " ".join(hashtags)
 
+    title = (video.title or video.topic)[:100]
+    if video.video_format == "vertical":
+        # Vertical + under a minute is uploaded as a Short; the tag helps it get classified.
+        if "#shorts" not in title.lower() and len(title) <= 92:
+            title += " #Shorts"
+        if "#Shorts" not in hashtags:
+            description += "\n\n#Shorts"
+
     body = {
         "snippet": {
-            "title": (video.title or video.topic)[:100],
+            "title": title,
             "description": (description[: 5000 - len(sources_block)] + sources_block)[:5000],
             "tags": tags[:500] if tags else [],
             "categoryId": _CATEGORY_MAP.get(video.category, "22"),

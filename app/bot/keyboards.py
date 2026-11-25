@@ -31,10 +31,46 @@ def languages() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(_rows(buttons, 2) + [[CANCEL]])
 
 
+LONG_LENGTHS = (2, 3, 5, 8, 10, 15)  # minutes
+
+
+def lengths() -> InlineKeyboardMarkup:
+    """Short or a specific long-video length (trending-topic flow)."""
+    minutes = [Btn(f"⏱ {m} min", callback_data=f"len:{m * 60}") for m in LONG_LENGTHS]
+    return InlineKeyboardMarkup(
+        [[Btn("📱 Short · under 1 min (vertical)", callback_data="len:short")]]
+        + _rows(minutes, 3)
+        + [[CANCEL]]
+    )
+
+
+def short_or_long() -> InlineKeyboardMarkup:
+    """Own script / own audio: the content decides the exact length."""
+    return InlineKeyboardMarkup([
+        [Btn("📱 Short · under 1 min (vertical)", callback_data="len:short")],
+        [Btn("🎬 Long video (horizontal)", callback_data="len:long")],
+        [CANCEL],
+    ])
+
+
+def fix_length(ai_script: bool) -> InlineKeyboardMarkup:
+    first = (
+        Btn("✂️ Write a shorter script", callback_data="fix:shorter")
+        if ai_script else Btn("📄 I'll send a shorter script", callback_data="fix:resend")
+    )
+    return InlineKeyboardMarkup([
+        [first],
+        [Btn("🎬 Make it a long video instead", callback_data="fix:long")],
+        [CANCEL],
+    ])
+
+
 def categories() -> InlineKeyboardMarkup:
     buttons = [Btn(c.button_label, callback_data=f"cat:{key}") for key, c in CATEGORIES.items()]
     return InlineKeyboardMarkup(
-        _rows(buttons, 2) + [[Btn("🌐 Change language", callback_data="nav:language"), CANCEL]]
+        _rows(buttons, 2)
+        + [[Btn("🌐 Language", callback_data="nav:language"), Btn("⏱ Length", callback_data="nav:length")],
+           [CANCEL]]
     )
 
 

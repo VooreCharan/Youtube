@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+from pathlib import Path
 from contextlib import suppress
 from typing import Any, Awaitable, Callable, Optional
 
@@ -30,7 +31,9 @@ from app.config import get_settings
 from app.services import trends_service
 from app.services.languages import get_language
 from app.services.llm_service import LLMUnavailableError
+from app.services import script_service
 from app.services.research_service import FactCheck
+from app.services.tts_service import TooLongForShort
 from app.services.youtube_service import YouTubeAuthRequired
 
 h = html.escape
@@ -41,6 +44,8 @@ _FAILED = object()
 # Which button actions are valid in which step (stale buttons are ignored).
 ALLOWED_STEPS = {
     "lang": {Step.CHOOSE_LANGUAGE},
+    "len": {Step.CHOOSE_LENGTH},
+    "fix": {Step.FIX_LENGTH},
     "cat": {Step.CHOOSE_CATEGORY},
     "topic": {Step.CHOOSE_TOPIC},
     "topics": {Step.CHOOSE_TOPIC, Step.AWAIT_CUSTOM_TOPIC},
@@ -263,6 +268,10 @@ async def _dispatch(action, arg, chat_id, session: Session, context, update) -> 
         await _choose_flow(arg, chat_id, session, context)
     elif action == "lang":
         await _language_chosen(arg, chat_id, session, context)
+    elif action == "len":
+        await _length_chosen(arg, chat_id, session, context)
+    elif action == "fix":
+        await _fix_length(arg, chat_id, session, context)
     elif action == "cat":
         session.category = arg
         session.shown_topics = []
@@ -277,7 +286,8 @@ async def _dispatch(action, arg, chat_id, session: Session, context, update) -> 
     elif action == "topic":
         index = int(arg)
         if 0 <= index < len(session.topics):
-            await start_script(chat_id, session, context, session.topics[index]["title"])
+            chosen = session.topics[index]
+            await start_script(chat_id, session, context, chosen["title"], chosen.get("title_en"))
     elif action == "script":
         await _script_action(arg, chat_id, session, context)
     elif action == "voices":
@@ -304,6 +314,8 @@ async def _navigate(where, chat_id, session: Session, context, update) -> None:
     elif where == "language":
         session.step = Step.CHOOSE_LANGUAGE
         await context.bot.send_message(chat_id, "🌐 Choose the language:", reply_markup=kb.languages())
+    elif where == "length":
+        await _ask_length(chat_id, session, context)
     elif where == "categories":
         session.step = Step.CHOOSE_CATEGORY
         await _send_categories(chat_id, session, context)
@@ -327,15 +339,7 @@ async def _choose_flow(choice, chat_id, session: Session, context) -> None:
     session.reset()
     if choice == "audio":
         session.flow = Flow.AUDIO
-        session.step = Step.AWAIT_AUDIO_FILE
-        await context.bot.send_message(
-            chat_id,
-            "🎧 <b>Send me your voice-over</b> as an audio file or voice message "
-            "(mp3, m4a, wav, ogg — max 20 MB).\n\n"
-            "I'll detect the language, write the title & description, add matching footage and subtitles.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb.InlineKeyboardMarkup([[kb.CANCEL]]),
-        )
+        await _ask_length(chat_id, session, context)
         return
 
     session.flow = Flow.TOPIC if choice == "topic" else Flow.SCRIPT
@@ -348,19 +352,104 @@ async def _choose_flow(choice, chat_id, session: Session, context) -> None:
 
 async def _language_chosen(code, chat_id, session: Session, context) -> None:
     session.language = get_language(code).code
-    if session.flow == Flow.SCRIPT:
-        session.step = Step.AWAIT_SCRIPT_TEXT
+    await _ask_length(chat_id, session, context)
+
+
+async def _ask_length(chat_id, session: Session, context) -> None:
+    session.step = Step.CHOOSE_LENGTH
+    if session.flow == Flow.TOPIC:
         await context.bot.send_message(
             chat_id,
-            f"📄 Paste your <b>{h(get_language(code).name)}</b> script as a message.\n\n"
+            "⏱ <b>How long should the video be?</b>\n\n"
+            "📱 <b>Short</b>: vertical, under 1 minute, for YouTube Shorts.\n"
+            "⏱ <b>Minutes</b>: a regular horizontal video; the script is written to that length.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.lengths(),
+        )
+    else:
+        what = "script" if session.flow == Flow.SCRIPT else "audio"
+        await context.bot.send_message(
+            chat_id,
+            f"📐 <b>Short or long video?</b>\n\nYour {what} decides the exact length. "
+            "A Short must be under 1 minute.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.short_or_long(),
+        )
+
+
+def _length_label(target) -> str:
+    if target == pipeline.SHORT:
+        return "📱 Short (under 1 min, vertical)"
+    if target:
+        return f"⏱ ~{target // 60} min video"
+    return "🎬 Long video"
+
+
+async def _length_chosen(arg, chat_id, session: Session, context) -> None:
+    session.target = pipeline.SHORT if arg == "short" else (int(arg) if arg.isdigit() else None)
+    await context.bot.send_message(chat_id, f"👍 {_length_label(session.target)}")
+
+    if session.flow == Flow.TOPIC:
+        session.step = Step.CHOOSE_CATEGORY
+        await _send_categories(chat_id, session, context)
+    elif session.flow == Flow.SCRIPT:
+        session.step = Step.AWAIT_SCRIPT_TEXT
+        language = get_language(session.language)
+        limit = ""
+        if session.target == pipeline.SHORT:
+            limit = (f"\n\n📱 For a Short, keep it under about "
+                     f"<b>{language.units_for(55)} {language.unit_name}</b> (≈55 seconds).")
+        await context.bot.send_message(
+            chat_id,
+            f"📄 Paste your <b>{h(language.name)}</b> script as a message.\n\n"
             "Only the words to be spoken — I'll generate the title, description, tags and visuals from it. "
-            "Long scripts can be sent in one message (up to 4096 characters).",
+            "Long scripts can be sent in one message (up to 4096 characters)." + limit,
             parse_mode=ParseMode.HTML,
             reply_markup=kb.InlineKeyboardMarkup([[kb.CANCEL]]),
         )
     else:
-        session.step = Step.CHOOSE_CATEGORY
-        await _send_categories(chat_id, session, context)
+        session.step = Step.AWAIT_AUDIO_FILE
+        limit = "\n\n📱 For a Short, the audio must be <b>under 60 seconds</b>." if session.target == pipeline.SHORT else ""
+        await context.bot.send_message(
+            chat_id,
+            "🎧 <b>Send me your voice-over</b> as an audio file or voice message "
+            "(mp3, m4a, wav, ogg — max 20 MB).\n\n"
+            "I'll detect the language, write the title & description, add matching footage and subtitles." + limit,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.InlineKeyboardMarkup([[kb.CANCEL]]),
+        )
+
+
+async def _fix_length(arg, chat_id, session: Session, context) -> None:
+    """A Short's voice-over came out too long."""
+    if arg == "shorter":
+        session.step = Step.REVIEW_SCRIPT
+        await _generate_script(chat_id, session, context, regenerate=True)
+    elif arg == "resend":
+        await pipeline.cancel(session.video_id)
+        session.video_id = None
+        session.step = Step.AWAIT_SCRIPT_TEXT
+        language = get_language(session.language)
+        await context.bot.send_message(
+            chat_id,
+            f"📄 Send a shorter script: about <b>{language.units_for(55)} {language.unit_name}</b> or less.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.InlineKeyboardMarkup([[kb.CANCEL]]),
+        )
+    elif arg == "long":
+        session.target = None
+        if session.pending_text:  # pasted script that was too long for a Short
+            text, session.pending_text = session.pending_text, None
+            await context.bot.send_message(chat_id, "🎬 OK, making a regular (horizontal) video.")
+            await _own_script_received(text, chat_id, session, context, None)
+            return
+        await pipeline.make_long(session.video_id)
+        await context.bot.send_message(chat_id, "🎬 OK, it's now a regular (horizontal) video.")
+        session.step = Step.CHOOSE_VOICE
+        if session.voice_index is not None:
+            await record_voiceover(chat_id, session, context, session.voice_index)
+        else:
+            await show_voices(chat_id, session, context)
 
 
 async def _send_categories(chat_id, session: Session, context) -> None:
@@ -410,7 +499,7 @@ async def _send_topic_list(chat_id, session: Session, context) -> None:
     )
 
 
-async def start_script(chat_id, session: Session, context, topic: str) -> None:
+async def start_script(chat_id, session: Session, context, topic: str, topic_en: Optional[str] = None) -> None:
     category = trends_service.CATEGORIES.get(session.category or "")
     language = get_language(session.language)
     session.video_id = await pipeline.create_video(
@@ -419,6 +508,8 @@ async def start_script(chat_id, session: Session, context, topic: str) -> None:
         language=language,
         source=Flow.TOPIC.value,
         chat_id=chat_id,
+        target=session.target,
+        topic_en=topic_en,
     )
     session.step = Step.REVIEW_SCRIPT
     await context.bot.send_message(chat_id, f"👍 Topic: <b>{h(topic)}</b>", parse_mode=ParseMode.HTML)
@@ -440,12 +531,14 @@ async def _generate_script(chat_id, session: Session, context, regenerate: bool)
 
 
 async def send_script(chat_id, video, context) -> None:
-    words = len((video.script or "").split())
-    minutes = max(1, round(words / 150))
     language = get_language(video.language)
+    units = language.count_units(video.script or "")
+    seconds = script_service.estimated_seconds(video.script or "", language)
+    kind = "📱 Short" if script_service.is_short(video) else "🎬 Video"
+    length = f"~{seconds} s" if seconds < 90 else f"~{round(seconds / 60)} min"
     header = (
         f"📝 <b>{h(video.title or video.topic)}</b>\n"
-        f"🌐 {h(language.name)} · {words} words · ~{minutes} min\n\n"
+        f"{kind} · 🌐 {h(language.name)} · {units} {language.unit_name} · {length} spoken\n\n"
     )
     for i, chunk in enumerate(_chunks(video.script or "")):
         await context.bot.send_message(chat_id, (header if i == 0 else "") + h(chunk), parse_mode=ParseMode.HTML)
@@ -459,10 +552,25 @@ async def send_script(chat_id, video, context) -> None:
     )
 
 
+def _mmss(audio_path) -> str:
+    try:
+        from app.services.video_service import _get_audio_duration
+
+        seconds = _get_audio_duration(Path(audio_path))
+        return f"{int(seconds // 60)}:{int(seconds % 60):02d}"
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 def fact_summary(video) -> str:
     """Fact-check result and sources, formatted for Telegram."""
     check = FactCheck.from_json(getattr(video, "fact_check", None))
     sources = json.loads(video.sources) if getattr(video, "sources", None) else []
+
+    research = ""
+    topic_en = getattr(video, "topic_en", None)
+    if topic_en and topic_en != video.topic:
+        research = f"🔎 Researched as: <i>{h(topic_en)}</i>\n"
 
     if check is None or not check.checked:
         reason = (check.error if check and check.error else "no sources could be found for this topic")
@@ -478,6 +586,8 @@ def fact_summary(video) -> str:
             lines.append(f"• “{h(quote)}”" + (f"\n   <i>{h(issue.get('problem', ''))}</i>" if issue.get("problem") else ""))
         lines.append("You can regenerate, edit it, or approve anyway.")
 
+    if research:
+        lines.insert(0, research.rstrip())
     if sources:
         lines.append("\n📚 <b>Sources</b>")
         for src in sources[:6]:
@@ -548,15 +658,34 @@ async def record_voiceover(chat_id, session: Session, context, index: int) -> No
     if not (0 <= index < len(session.voices)):
         return
     voice, _ = session.voices[index]
+    session.voice_index = index
+
+    async def work(report):
+        try:
+            return await pipeline.narrate(session.video_id, voice.id)
+        except TooLongForShort as exc:
+            return exc
+
     video = await run_step(
         context,
         chat_id,
         f"Recording the full voice-over with <b>{h(voice.label)}</b>…",
-        lambda report: pipeline.narrate(session.video_id, voice.id),
+        work,
         retry=f"voice:{index}",
         action=ChatAction.RECORD_VOICE,
     )
     if video is _FAILED:
+        return
+    if isinstance(video, TooLongForShort):
+        session.step = Step.FIX_LENGTH
+        await context.bot.send_message(
+            chat_id,
+            f"⏱ <b>Too long for a Short.</b> The voice-over is <b>{video.seconds:.0f} seconds</b>; "
+            f"Shorts must be under {video.limit:.0f}. Speeding it up enough would sound rushed.\n\n"
+            "What would you like to do?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.fix_length(ai_script=session.flow == Flow.TOPIC),
+        )
         return
 
     session.step = Step.REVIEW_AUDIO
@@ -566,7 +695,8 @@ async def record_voiceover(chat_id, session: Session, context, index: int) -> No
             audio=fh,
             title=(video.title or video.topic)[:60],
             performer=voice.label,
-            caption="🎧 <b>Your voice-over is ready.</b> Listen and approve it to build the video.",
+            caption=f"🎧 <b>Your voice-over is ready</b> ({_mmss(video.audio_path)}). "
+            "Listen and approve it to build the video.",
             parse_mode=ParseMode.HTML,
             reply_markup=kb.audio_review(),
             write_timeout=300,
@@ -739,16 +869,30 @@ async def _handle_text(text, chat_id, session: Session, context, update) -> None
 
 
 async def _own_script_received(text, chat_id, session: Session, context, update) -> None:
-    if len(text.split()) < 30:
-        await update.message.reply_text(
-            "That's quite short — please send at least ~30 words of script (or say hi to start over)."
+    language = get_language(session.language)
+    if language.count_units(text) < (100 if language.counts_characters else 30):
+        await context.bot.send_message(
+            chat_id, "That's quite short — please send at least ~30 words of script (or say hi to start over)."
         )
         return
 
-    language = get_language(session.language)
+    if session.target == pipeline.SHORT:
+        seconds = script_service.estimated_seconds(text, language)
+        if seconds > script_service.SHORT_MAX_SECONDS * 1.2:
+            session.pending_text = text
+            session.step = Step.FIX_LENGTH
+            await context.bot.send_message(
+                chat_id,
+                f"⏱ <b>That script is about {seconds} seconds</b> when spoken — too long for a Short "
+                f"(under 60 s, roughly {language.units_for(55)} {language.unit_name}).",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb.fix_length(ai_script=False),
+            )
+            return
+
     session.video_id = await pipeline.create_video(
         topic="Custom script", category="People & Blogs", language=language,
-        source=Flow.SCRIPT.value, chat_id=chat_id,
+        source=Flow.SCRIPT.value, chat_id=chat_id, target=session.target,
     )
     video = await run_step(
         context,
@@ -805,7 +949,7 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with session.lock:
         session.video_id = await pipeline.create_video(
             topic="Uploaded audio", category="People & Blogs", language=get_language(None),
-            source=Flow.AUDIO.value, chat_id=chat_id,
+            source=Flow.AUDIO.value, chat_id=chat_id, target=session.target,
         )
         target = pipeline.save_upload_path(session.video_id, filename)
 
@@ -821,10 +965,14 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         session.language = video.language
+        note = ""
+        if session.target == pipeline.SHORT and video.video_format != "vertical":
+            note = (f"\n\n⏱ Your audio is {_mmss(video.audio_path)}, longer than a Short allows (under 1 min), "
+                    "so I'm making a regular horizontal video instead.")
         await context.bot.send_message(
             chat_id,
             f"✅ Detected <b>{h(get_language(video.language).name)}</b> · "
-            f"<b>{h(video.title or '')}</b>",
+            f"<b>{h(video.title or '')}</b>{note}",
             parse_mode=ParseMode.HTML,
         )
         await build_video(chat_id, session, context)

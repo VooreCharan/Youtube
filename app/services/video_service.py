@@ -92,9 +92,16 @@ def _run_ffmpeg_pipeline(
 
         family = subtitle_font_family(language)
         font_name = f"FontName={family}," if family else ""
-        # Subtitle styling: small bold white text, translucent outline, anchored to bottom
-        font_size = 14
-        style = f"{font_name}FontSize={font_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H99000000,BorderStyle=1,Outline=2.5,Shadow=0,Bold=-1,MarginV=10,Alignment=2"
+        # Subtitle styling: bold white text with a translucent outline. Sizes are in libass
+        # script units (288 = frame height). Shorts: smaller and raised to ~30% from the
+        # bottom, clear of YouTube's title/buttons overlay.
+        if target_h > target_w:
+            font_size, margin_v, margin_lr = 9, 86, 20
+        else:
+            font_size, margin_v, margin_lr = 14, 10, 10
+        style = (f"{font_name}FontSize={font_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H99000000,"
+                 f"BorderStyle=1,Outline=2.5,Shadow=0,Bold=-1,MarginV={margin_v},MarginL={margin_lr},"
+                 f"MarginR={margin_lr},Alignment=2")
         vf += f",subtitles='{sub_name}':force_style='{style}'"
 
     cmd = [

@@ -146,6 +146,8 @@ def _is_out_of_credits(exc: Exception) -> bool:
 def _classify(exc: Exception) -> _Failure:
     status = getattr(exc, "status_code", None)
     name = exc.__class__.__name__
+    if name == "_PacingSkip":
+        return _Failure(0, "waiting for per-minute token budget", False, True)
     if status in (401, 403) or name in ("AuthenticationError", "PermissionDeniedError"):
         return _Failure(30 * 60, f"bad API key / no access ({status})", True, False)
     if status == 402:
@@ -186,24 +188,129 @@ def _on_cooldown(target: Target, now: float) -> bool:
     ) > now
 
 
+class _TokenPacer:
+    """
+    Client-side tokens-per-minute budget per Groq model (free tier: 8k TPM).
+
+    Bursts of requests (e.g. writing 8 scenes) would otherwise hit 429s and
+    push work onto slower, often-overloaded backups. When a model needs a few
+    seconds to refill, it's cheaper to wait than to fall through.
+    """
+
+    def __init__(self):
+        self._tokens: Dict[str, float] = {}
+        self._stamp: Dict[str, float] = {}
+        self._locks: Dict[str, asyncio.Lock] = {}
+
+    def _refill(self, key: str, capacity: float) -> float:
+        now = time.monotonic()
+        tokens = self._tokens.get(key, capacity)
+        tokens = min(capacity, tokens + (now - self._stamp.get(key, now)) * capacity / 60)
+        self._tokens[key], self._stamp[key] = tokens, now
+        return tokens
+
+    async def acquire(self, key: str, need: float, capacity: float, max_wait: float) -> bool:
+        need = min(need, capacity)
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            tokens = self._refill(key, capacity)
+            if tokens < need:
+                wait = (need - tokens) * 60 / capacity
+                if wait > max_wait:
+                    return False
+                logger.info("Pacing {}: waiting {:.0f}s for its per-minute token budget", key, wait)
+                await asyncio.sleep(wait)
+                self._refill(key, capacity)
+            self._tokens[key] -= need
+            return True
+
+    def settle(self, key: str, estimated: float, used: float, capacity: float) -> None:
+        self._refill(key, capacity)
+        self._tokens[key] = min(capacity, self._tokens[key] + estimated - used)
+
+    def ready(self, key: str, need: float, capacity: float) -> bool:
+        """Would *need* tokens be available right now (no waiting)?"""
+        return self._refill(key, capacity) >= min(need, capacity)
+
+    def exhaust(self, key: str) -> None:
+        self._tokens[key] = 0.0
+        self._stamp[key] = time.monotonic()
+
+
+_pacer = _TokenPacer()
+
+
+def _estimate_tokens(prompt: str) -> float:
+    """Conservative token estimate (non-Latin scripts use more tokens per character)."""
+    non_ascii = sum(1 for ch in prompt if ord(ch) > 127)
+    return (len(prompt) - non_ascii) / 3.5 + non_ascii / 1.5 + 1200  # + typical answer
+
+
+def _request_options(target: Target) -> dict:
+    """Provider-specific options.
+
+    Groq's default answer length (~3k tokens) truncates long JSON (outlines,
+    scripts), and its gpt-oss models spend part of that budget "thinking" —
+    so ask for longer answers with low reasoning effort. The limit stays
+    under Groq's free 8k-tokens-per-minute so a request can't be rejected
+    as too large.
+    """
+    options: dict = {}
+    if target.provider.name == "groq":
+        options["max_tokens"] = get_settings().groq_max_tokens
+        if "gpt-oss" in target.model:
+            options["reasoning_effort"] = "low"
+    return options
+
+
 async def _complete(target: Target, prompt: str, timeout: float) -> str:
-    response = await asyncio.wait_for(
+    paced = target.provider.name == "groq"
+    settings = get_settings()
+    estimate = _estimate_tokens(prompt)
+    if paced and not await _pacer.acquire(target.key, estimate, settings.groq_tpm, settings.groq_max_pace_wait):
+        raise _PacingSkip(f"{target.key} needs more time to refill its per-minute token budget")
+    try:
+        response = await _create(target, prompt, timeout)
+    except Exception as exc:
+        if paced and getattr(exc, "status_code", None) == 429:
+            _pacer.exhaust(target.key)
+        raise
+    if paced and getattr(response, "usage", None):
+        _pacer.settle(target.key, estimate, response.usage.total_tokens or estimate, settings.groq_tpm)
+    if not response.choices:
+        return ""
+    choice = response.choices[0]
+    if getattr(choice, "finish_reason", None) == "length":
+        logger.warning("LLM {} hit its answer-length limit; the answer may be cut off", target.key)
+    return (choice.message.content or "").strip()
+
+
+class _PacingSkip(RuntimeError):
+    """A paced model would need too long to refill; try the next one."""
+
+
+async def _create(target: Target, prompt: str, timeout: float):
+    return await asyncio.wait_for(
         _client(target.provider).chat.completions.create(
             model=target.model,
             messages=[{"role": "user", "content": prompt}],
+            **_request_options(target),
         ),
         timeout=timeout,
     )
-    return (response.choices[0].message.content or "").strip() if response.choices else ""
 
 
-async def _run_chain(prompt: str, accept: Callable[[str], Any]) -> Any:
+async def _run_chain(prompt: str, accept: Callable[[str], Any], prefer: Optional[List[str]] = None) -> Any:
     """
     Try each target until *accept(text)* returns a non-None value.
     *accept* returns None to reject an answer (e.g. invalid JSON) without cooldown.
     """
     settings = get_settings()
     chain = build_chain()
+    if prefer:
+        # Task-specific order (e.g. translation): preferred providers first, the rest after.
+        rank = {name: i for i, name in enumerate(prefer)}
+        chain = sorted(chain, key=lambda t: rank.get(t.provider.name, len(prefer)))
     if not chain:
         raise LLMUnavailableError(
             "No AI provider is configured. Add at least one key to .env "
@@ -220,6 +327,20 @@ async def _run_chain(prompt: str, accept: Callable[[str], Any]) -> Any:
     # Models resting after a *temporary* failure (overload, rate limit) are skipped
     # at first, but get another chance if everything else fails too.
     rested = [t for t in chain if t not in first_round and _health.transient.get(t.key)]
+
+    # Among Groq models, ones that can answer right now go before ones that
+    # would have to wait for their per-minute budget (spreads bursts across
+    # all Groq models instead of queueing on the first).
+    estimate = _estimate_tokens(prompt)
+    tpm = settings.groq_tpm
+    first_round = sorted(
+        first_round,
+        key=lambda t: (
+            chain.index(t) if t.provider.name != "groq"
+            else min(chain.index(x) for x in chain if x.provider.name == "groq")
+            + (0 if _pacer.ready(t.key, estimate, tpm) else 0.5) + chain.index(t) * 1e-3
+        ),
+    )
 
     failures: List[str] = []
     candidates = first_round
@@ -303,6 +424,7 @@ async def call_llm(prompt: str, *, json_mode: bool = False) -> str:
 async def call_llm_json(
     prompt: str,
     validate: Optional[Callable[[Any], bool]] = None,
+    prefer: Optional[List[str]] = None,
 ) -> dict | list | None:
     """
     Call the chain and parse JSON. If a model returns invalid JSON, or JSON
@@ -321,7 +443,7 @@ async def call_llm_json(
                 return None
         return data
 
-    return await _run_chain(prompt + _JSON_SUFFIX, accept)
+    return await _run_chain(prompt + _JSON_SUFFIX, accept, prefer)
 
 
 _JSON_SUFFIX = (

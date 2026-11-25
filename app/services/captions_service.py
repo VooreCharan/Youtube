@@ -182,6 +182,13 @@ def _balanced_chunks(words: List[str], max_words: int) -> List[List[str]]:
     return [words[i : i + size] for i in range(0, len(words), size)]
 
 
+# Typographic characters some caption fonts lack (rendered as empty boxes).
+_PLAIN = str.maketrans({
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "–", "\u2015": "—",
+    "\u00a0": " ", "\u202f": " ", "\u2009": " ", "\u200b": "", "\u2060": "",
+})
+
+
 def to_srt(segments: List[Segment]) -> str:
     lines: List[str] = []
     for idx, seg in enumerate(segments, start=1):
@@ -191,7 +198,7 @@ def to_srt(segments: List[Segment]) -> str:
         lines += [
             str(idx),
             f"{format_srt_timestamp(seg.start)} --> {format_srt_timestamp(end)}",
-            seg.text,
+            seg.text.translate(_PLAIN),
             "",
         ]
     return "\n".join(lines)

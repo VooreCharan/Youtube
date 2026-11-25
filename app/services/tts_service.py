@@ -70,7 +70,7 @@ def _run_gtts(text: str, lang: str, output_path: Path) -> None:
     gTTS(text=text, lang=lang, slow=False).save(str(output_path))
 
 
-async def _edge(text: str, voice: str, output_path: Path) -> list:
+async def _edge(text: str, voice: str, output_path: Path, rate: str = "+0%") -> list:
     """Render with Edge-TTS; returns sentence timings as caption Segments."""
     import edge_tts
 
@@ -78,7 +78,7 @@ async def _edge(text: str, voice: str, output_path: Path) -> list:
 
     segments = []
     with open(output_path, "wb") as audio:
-        async for chunk in edge_tts.Communicate(text, voice, boundary="SentenceBoundary").stream():
+        async for chunk in edge_tts.Communicate(text, voice, rate=rate, boundary="SentenceBoundary").stream():
             if chunk["type"] == "audio":
                 audio.write(chunk["data"])
             elif chunk["type"] in ("SentenceBoundary", "WordBoundary"):
@@ -87,7 +87,9 @@ async def _edge(text: str, voice: str, output_path: Path) -> list:
     return segments
 
 
-async def synthesize(text: str, voice: str, output_path: Path) -> Tuple[str, Optional[list]]:
+async def synthesize(
+    text: str, voice: str, output_path: Path, rate: str = "+0%"
+) -> Tuple[str, Optional[list]]:
     """
     Render *text* with *voice* to *output_path* (MP3).
 
@@ -111,7 +113,7 @@ async def synthesize(text: str, voice: str, output_path: Path) -> Tuple[str, Opt
         try:
             timings = None
             if engine == "edge":
-                timings = await _edge(text, v, output_path)
+                timings = await _edge(text, v, output_path, rate)
             else:
                 await asyncio.to_thread(_run_gtts, text, language.code, output_path)
             if not output_path.exists() or output_path.stat().st_size == 0:
@@ -128,12 +130,67 @@ async def synthesize(text: str, voice: str, output_path: Path) -> Tuple[str, Opt
 
 # ── Public API ──────────────────────────────────────────────────────
 
+class TooLongForShort(RuntimeError):
+    """The voice-over can't be made to fit a Short without sounding rushed."""
+
+    def __init__(self, seconds: float, limit: float):
+        super().__init__(f"The voice-over is {seconds:.0f}s — a Short must be under {limit:.0f}s.")
+        self.seconds = seconds
+        self.limit = limit
+
+
+_MAX_SPEEDUP = 1.25  # beyond this, narration sounds rushed
+
+
+def _duration(path: Path) -> float:
+    from app.services.video_service import _get_audio_duration
+
+    return _get_audio_duration(path)
+
+
+async def _fit_duration(narration: str, voice: str, path: Path, duration: float, limit: float):
+    """Speed up a slightly-too-long voice-over (pitch kept) so it fits *limit*."""
+    import math
+
+    factor = duration / (limit - 1.0)
+    if factor > _MAX_SPEEDUP:
+        raise TooLongForShort(duration, limit)
+
+    if voice.startswith(GTTS_VOICE_PREFIX):
+        # gTTS has no rate control: time-stretch the file with FFmpeg.
+        from app.services.video_service import _FFMPEG_EXE
+        import subprocess
+
+        tmp = path.with_suffix(".fast.mp3")
+        await asyncio.to_thread(
+            subprocess.run,
+            [_FFMPEG_EXE, "-y", "-i", str(path), "-filter:a", f"atempo={factor:.3f}", str(tmp)],
+            capture_output=True, check=True,
+        )
+        tmp.replace(path)
+        timings = None
+    else:
+        rate = f"+{math.ceil((factor - 1) * 100) + 2}%"
+        logger.info("Voice-over {:.1f}s > {:.0f}s — re-recording at {}", duration, limit, rate)
+        voice, timings = await synthesize(narration, voice, path, rate=rate)
+
+    duration = await asyncio.to_thread(_duration, path)
+    if duration > limit:
+        raise TooLongForShort(duration, limit)
+    return voice, timings, duration
+
+
 async def generate_audio(
     db: AsyncSession,
     video_id: int,
     voice: Optional[str] = None,
+    max_seconds: Optional[float] = None,
 ) -> str:
-    """Generate the full MP3 narration for a video. Returns the audio path."""
+    """Generate the full MP3 narration for a video. Returns the audio path.
+
+    With *max_seconds* (Shorts), a slightly long voice-over is re-recorded
+    faster; one that is far too long raises :class:`TooLongForShort`.
+    """
     settings = get_settings()
 
     video = await db.get(Video, video_id)
@@ -151,7 +208,13 @@ async def generate_audio(
     logger.info("Generating narration for Video id={} with voice '{}'", video_id, selected_voice)
 
     used_voice, timings = await synthesize(narration, selected_voice, output_path)
-    logger.info("Narration saved: {} ({:.1f} KB)", output_path, output_path.stat().st_size / 1024)
+    duration = await asyncio.to_thread(_duration, output_path)
+    logger.info("Narration saved: {} ({:.1f}s)", output_path, duration)
+
+    if max_seconds and duration > max_seconds:
+        used_voice, timings, duration = await _fit_duration(
+            narration, used_voice, output_path, duration, max_seconds
+        )
 
     # Exact sentence timings make the best captions; without them (gTTS) the
     # subtitle step falls back to transcribing the audio.
